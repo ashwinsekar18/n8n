@@ -186,15 +186,18 @@ function initSelections() {
 		if (!card.credentialType) continue;
 		if (selections.value[card.id] !== undefined) continue;
 
-		const firstReq = card.nodes[0];
 		const credType = card.credentialType;
 
-		// 1. Pre-fill from node's existing credential assignment
-		const existingOnNode = firstReq.node.credentials?.[credType];
-		if (existingOnNode?.id) {
-			selections.value[card.id] = existingOnNode.id;
-		} else if (firstReq.existingCredentials?.length === 1) {
-			// 2. Auto-select if exactly one credential available
+		// 1. Pre-fill from any node in the group that already has this credential assigned
+		const nodeWithCred = card.nodes.find((req) => req.node.credentials?.[credType]?.id);
+		if (nodeWithCred) {
+			selections.value[card.id] = nodeWithCred.node.credentials![credType].id;
+			continue;
+		}
+
+		// 2. Auto-select if exactly one credential available (check first node's list)
+		const firstReq = card.nodes[0];
+		if (firstReq.existingCredentials?.length === 1) {
 			selections.value[card.id] = firstReq.existingCredentials[0].id;
 		} else if (card.isAutoApplied && firstReq.existingCredentials?.length) {
 			// 3. Auto-selected by backend (most recent)

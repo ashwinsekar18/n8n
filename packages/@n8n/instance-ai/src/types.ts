@@ -255,7 +255,7 @@ export interface ExploreResourcesResult {
 
 export interface InstanceAiNodeService {
 	listAvailable(options?: { query?: string }): Promise<NodeSummary[]>;
-	getDescription(nodeType: string): Promise<NodeDescription>;
+	getDescription(nodeType: string, version?: number): Promise<NodeDescription>;
 	/** Return all node types with the richer fields needed by NodeSearchEngine. */
 	listSearchable(): Promise<SearchableNodeDescription[]>;
 	/** Return the TypeScript type definition for a node (from dist/node-definitions/). */

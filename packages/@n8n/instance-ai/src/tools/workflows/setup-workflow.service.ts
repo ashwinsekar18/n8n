@@ -30,7 +30,9 @@ export async function buildSetupRequests(
 	const typeVersion = node.typeVersion ?? 1;
 	const parameters = (node.parameters as Record<string, unknown>) ?? {};
 
-	const nodeDesc = await context.nodeService.getDescription(node.type).catch(() => undefined);
+	const nodeDesc = await context.nodeService
+		.getDescription(node.type, typeVersion)
+		.catch(() => undefined);
 
 	const isTrigger = nodeDesc?.group?.includes('trigger') ?? false;
 	const isTestable =
@@ -211,25 +213,35 @@ export function sortByExecutionOrder(
 	requests: SetupRequest[],
 	connections: Record<string, unknown>,
 ): void {
-	const adjacency = new Map<string, string[]>();
+	// Build main outgoing adjacency (source -> destinations via 'main' outputs)
+	const mainOutgoing = new Map<string, string[]>();
+	// Build non-main incoming adjacency (destination -> sources via non-main inputs)
+	// Non-main connections represent AI sub-nodes (tools, memory, models) attached to agent nodes
+	const nonMainIncoming = new Map<string, string[]>();
+
 	for (const [sourceName, nodeConns] of Object.entries(connections)) {
 		if (typeof nodeConns !== 'object' || nodeConns === null) continue;
-		const destinations: string[] = [];
-		for (const outputs of Object.values(nodeConns as Record<string, unknown>)) {
+		for (const [connType, outputs] of Object.entries(nodeConns as Record<string, unknown>)) {
 			if (!Array.isArray(outputs)) continue;
 			for (const slot of outputs) {
 				if (!Array.isArray(slot)) continue;
 				for (const conn of slot) {
-					if (typeof conn === 'object' && conn !== null && 'node' in conn) {
-						const destName = (conn as { node: string }).node;
-						if (!destinations.includes(destName)) {
-							destinations.push(destName);
-						}
+					if (typeof conn !== 'object' || conn === null || !('node' in conn)) continue;
+					const destName = (conn as { node: string }).node;
+
+					if (connType === 'main') {
+						const existing = mainOutgoing.get(sourceName) ?? [];
+						if (!existing.includes(destName)) existing.push(destName);
+						mainOutgoing.set(sourceName, existing);
+					} else {
+						// Non-main connection: source is an AI sub-node of destination
+						const existing = nonMainIncoming.get(destName) ?? [];
+						if (!existing.includes(sourceName)) existing.push(sourceName);
+						nonMainIncoming.set(destName, existing);
 					}
 				}
 			}
 		}
-		adjacency.set(sourceName, destinations);
 	}
 
 	const triggerRequests = requests
@@ -242,8 +254,17 @@ export function sortByExecutionOrder(
 	function dfs(nodeName: string): void {
 		if (visited.has(nodeName)) return;
 		visited.add(nodeName);
+
+		// Visit AI sub-nodes BEFORE the parent (non-main incoming connections)
+		const subNodes = nonMainIncoming.get(nodeName) ?? [];
+		for (const subNode of subNodes) {
+			dfs(subNode);
+		}
+
 		executionOrder.push(nodeName);
-		const children = adjacency.get(nodeName) ?? [];
+
+		// Follow main outgoing connections
+		const children = mainOutgoing.get(nodeName) ?? [];
 		for (const child of children) {
 			dfs(child);
 		}

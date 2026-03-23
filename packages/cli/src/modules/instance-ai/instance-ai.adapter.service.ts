@@ -1241,9 +1241,20 @@ export class InstanceAiAdapterService {
 				});
 			},
 
-			async getDescription(nodeType: string) {
+			async getDescription(nodeType: string, version?: number) {
 				const nodes = await getNodes();
-				const desc = nodes.find((n) => n.name === nodeType);
+				let desc =
+					version !== undefined
+						? nodes.find((n) => {
+								if (n.name !== nodeType) return false;
+								if (Array.isArray(n.version)) return n.version.includes(version);
+								return n.version === version;
+							})
+						: undefined;
+				// Fallback to any version if exact match not found
+				if (!desc) {
+					desc = nodes.find((n) => n.name === nodeType);
+				}
 
 				if (!desc) {
 					throw new Error(`Node type ${nodeType} not found`);

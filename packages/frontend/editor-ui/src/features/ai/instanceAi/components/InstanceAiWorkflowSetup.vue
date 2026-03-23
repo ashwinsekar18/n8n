@@ -165,6 +165,7 @@ const isSubmitted = ref(false);
 const isDeferred = ref(false);
 const selections = ref<Record<string, string | null>>({});
 const paramValues = ref<Record<string, Record<string, unknown>>>({});
+const credTestOverrides = ref<Record<string, { success: boolean; message?: string } | null>>({});
 
 const triggerTestResults = computed(() => {
 	const results: Record<string, InstanceAiWorkflowSetupNode['triggerTestResult']> = {};
@@ -175,18 +176,6 @@ const triggerTestResults = computed(() => {
 	}
 	return results;
 });
-
-// Sticky card tracking
-const shownCardIds = ref(new Set<string>());
-watch(
-	cards,
-	(newCards) => {
-		for (const card of newCards) {
-			shownCardIds.value.add(card.id);
-		}
-	},
-	{ immediate: true },
-);
 
 // ---------------------------------------------------------------------------
 // Auto-credential selection — keyed by card ID
@@ -251,6 +240,69 @@ function setParamValue(nodeName: string, paramName: string, value: unknown): voi
 }
 
 // ---------------------------------------------------------------------------
+// Credential test result helpers
+// ---------------------------------------------------------------------------
+
+function getEffectiveCredTestResult(
+	card: SetupCard,
+): { success: boolean; message?: string } | undefined | null {
+	if (card.id in credTestOverrides.value) {
+		return credTestOverrides.value[card.id];
+	}
+	return card.credentialTestResult;
+}
+
+// ---------------------------------------------------------------------------
+// Parameter validation helpers
+// ---------------------------------------------------------------------------
+
+function isParamValueValid(
+	param: NonNullable<InstanceAiWorkflowSetupNode['editableParameters']>[number],
+	value: unknown,
+): boolean {
+	if (value === undefined || value === null || value === '') return false;
+	if (param.options && param.options.length > 0) {
+		return param.options.some((opt) => String(opt.value) === String(value));
+	}
+	if (param.type === 'number') {
+		return typeof value === 'number' && !Number.isNaN(value);
+	}
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Trigger test result helper
+// ---------------------------------------------------------------------------
+
+function getTriggerResult(
+	card: SetupCard,
+): InstanceAiWorkflowSetupNode['triggerTestResult'] | undefined {
+	const triggerNode = card.nodes.find((n) => n.isTrigger);
+	return triggerNode ? triggerTestResults.value[triggerNode.node.name] : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Trigger test button disabled logic
+// ---------------------------------------------------------------------------
+
+function isTriggerTestDisabled(card: SetupCard): boolean {
+	// Disabled if credential not selected
+	if (card.credentialType && selections.value[card.id] === null) return true;
+	// Disabled if credential test failed
+	const testResult = getEffectiveCredTestResult(card);
+	if (testResult !== undefined && testResult !== null && !testResult.success) return true;
+	// Disabled if parameter issues not resolved
+	if (card.hasParamIssues) {
+		const editableParams = getCardEditableParams(card);
+		const nodeName = card.nodes[0].node.name;
+		for (const param of editableParams) {
+			if (!isParamValueValid(param, getParamValue(nodeName, param.name))) return true;
+		}
+	}
+	return false;
+}
+
+// ---------------------------------------------------------------------------
 // Completion — first-trigger-only logic
 // ---------------------------------------------------------------------------
 
@@ -258,16 +310,19 @@ function isCardComplete(card: SetupCard): boolean {
 	if (card.credentialType) {
 		const selectedId = selections.value[card.id];
 		if (!selectedId) return false;
-		if (card.credentialTestResult && !card.credentialTestResult.success) return false;
+		const testResult = getEffectiveCredTestResult(card);
+		// null = user changed credential, test cleared — not blocking
+		// { success: false } = test failed — blocking
+		if (testResult !== undefined && testResult !== null && !testResult.success) return false;
 	}
 
-	// Parameter issues check — all issue parameters must have values
+	// Parameter issues check — type-aware validation
 	if (card.hasParamIssues) {
-		const issues = getCardParamIssues(card);
+		const editableParams = getCardEditableParams(card);
 		const nodeName = card.nodes[0].node.name;
-		for (const paramName of Object.keys(issues)) {
-			const val = getParamValue(nodeName, paramName);
-			if (val === undefined || val === null || val === '') return false;
+		for (const param of editableParams) {
+			const val = getParamValue(nodeName, param.name);
+			if (!isParamValueValid(param, val)) return false;
 		}
 	}
 
@@ -378,9 +433,11 @@ function getCredTestIcon(card: SetupCard): 'spinner' | 'check' | 'triangle-alert
 	const selectedId = selections.value[card.id];
 	if (!selectedId) return null;
 
-	if (card.isAutoApplied && !card.credentialTestResult) return 'spinner';
-	if (card.credentialTestResult?.success) return 'check';
-	if (card.credentialTestResult && !card.credentialTestResult.success) return 'triangle-alert';
+	const testResult = getEffectiveCredTestResult(card);
+	if (testResult === null) return null; // User changed credential, no test result
+	if (card.isAutoApplied && testResult === undefined) return 'spinner';
+	if (testResult?.success) return 'check';
+	if (testResult !== undefined && !testResult.success) return 'triangle-alert';
 	return null;
 }
 
@@ -438,6 +495,8 @@ function onCredentialSelected(card: SetupCard, updateInfo: INodeUpdateProperties
 	} else {
 		selections.value[card.id] = null;
 	}
+	// Clear stale backend test result — this credential hasn't been tested
+	credTestOverrides.value[card.id] = null;
 }
 
 function handleTestTrigger(nodeName: string) {
@@ -673,6 +732,21 @@ function handleLater() {
 					</div>
 				</div>
 
+				<!-- Listening callout for webhook triggers -->
+				<div
+					v-if="
+						currentCard.isTrigger &&
+						currentCard.isFirstTrigger &&
+						getTriggerResult(currentCard)?.status === 'listening'
+					"
+					:class="$style.listeningCallout"
+				>
+					<N8nIcon icon="spinner" size="small" :class="$style.loading" />
+					<N8nText size="small" color="text-light">
+						{{ i18n.baseText('instanceAi.workflowSetup.triggerListening') }}
+					</N8nText>
+				</div>
+
 				<!-- Footer -->
 				<footer :class="$style.footer">
 					<div :class="$style.footerNav">
@@ -720,7 +794,7 @@ function handleLater() {
 							size="small"
 							:class="$style.actionButton"
 							:label="i18n.baseText('instanceAi.workflowSetup.testTrigger')"
-							:disabled="currentCard.credentialType ? selections[currentCard.id] === null : false"
+							:disabled="isTriggerTestDisabled(currentCard)"
 							data-test-id="instance-ai-workflow-setup-test-trigger"
 							@click="handleTestTrigger(currentCard.nodes.find((n) => n.isTrigger)!.node.name)"
 						/>
@@ -848,6 +922,13 @@ function handleLater() {
 	width: var(--spacing--sm);
 	height: var(--spacing--sm);
 	cursor: pointer;
+}
+
+.listeningCallout {
+	display: flex;
+	align-items: center;
+	gap: var(--spacing--4xs);
+	padding: 0 var(--spacing--sm) var(--spacing--2xs);
 }
 
 .footer {

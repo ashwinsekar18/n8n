@@ -70,10 +70,15 @@ function credGroupKey(req: InstanceAiWorkflowSetupNode): string {
 }
 
 const cards = computed((): SetupCard[] => {
-	// Process requests in backend order. Group credential requests that share
-	// the same key; keep a stable insertion-order map so the first occurrence
-	// determines position in the final list.
-	// Nodes with parameter issues get their own card (not grouped).
+	// Pre-scan: if ANY node in a credential group has param issues,
+	// the entire group is escalated to per-node mode (matches upstream).
+	const escalatedCredTypes = new Set<string>();
+	for (const req of props.setupRequests) {
+		if (req.credentialType && req.parameterIssues && Object.keys(req.parameterIssues).length > 0) {
+			escalatedCredTypes.add(credGroupKey(req));
+		}
+	}
+
 	const ordered: SetupCard[] = [];
 	const credCardByKey = new Map<string, SetupCard>();
 
@@ -82,10 +87,13 @@ const cards = computed((): SetupCard[] => {
 			req.parameterIssues !== undefined && Object.keys(req.parameterIssues).length > 0;
 
 		if (req.credentialType) {
-			// Nodes with param issues get their own card (not grouped with others)
-			if (hasParamIssues) {
+			const key = credGroupKey(req);
+
+			// If any node in this credential group has param issues,
+			// every node in the group gets its own per-node card
+			if (escalatedCredTypes.has(key)) {
 				ordered.push({
-					id: `param-${req.node.id}`,
+					id: `node-${req.node.id}`,
 					credentialType: req.credentialType,
 					nodes: [req],
 					isTrigger: req.isTrigger,
@@ -93,10 +101,9 @@ const cards = computed((): SetupCard[] => {
 					isTestable: req.isTestable ?? false,
 					credentialTestResult: req.credentialTestResult,
 					isAutoApplied: req.isAutoApplied ?? false,
-					hasParamIssues: true,
+					hasParamIssues,
 				});
 			} else {
-				const key = credGroupKey(req);
 				const existing = credCardByKey.get(key);
 				if (existing) {
 					existing.nodes.push(req);
@@ -274,9 +281,7 @@ function isCardComplete(card: SetupCard): boolean {
 	return true;
 }
 
-const allCredentialsSelected = computed(() =>
-	cards.value.filter((c) => c.credentialType).every((c) => selections.value[c.id] !== null),
-);
+const allCardsComplete = computed(() => cards.value.every((c) => isCardComplete(c)));
 
 // ---------------------------------------------------------------------------
 // Auto-advance: only when a card transitions from incomplete -> complete
@@ -723,7 +728,7 @@ function handleLater() {
 						<N8nButton
 							size="small"
 							:class="$style.actionButton"
-							:disabled="!allCredentialsSelected"
+							:disabled="!allCardsComplete"
 							:label="i18n.baseText('instanceAi.workflowSetup.apply')"
 							data-test-id="instance-ai-workflow-setup-apply-button"
 							@click="handleApply"

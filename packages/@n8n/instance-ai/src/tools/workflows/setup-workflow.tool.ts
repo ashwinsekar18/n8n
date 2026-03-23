@@ -460,8 +460,8 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 
 			// State 3: Test trigger — persist creds, run trigger, re-suspend with result
 			if (resumeData.action === 'test-trigger' && resumeData.testTriggerNode) {
-				// Save snapshot before applying credentials for trigger test
-				preTestSnapshot = await context.workflowService.getAsWorkflowJSON(input.workflowId);
+				// Save snapshot only on the first test — preserve the original pre-setup state
+				preTestSnapshot ??= await context.workflowService.getAsWorkflowJSON(input.workflowId);
 
 				if (resumeData.credentials) {
 					await applyNodeCredentials(context, input.workflowId, resumeData.credentials);

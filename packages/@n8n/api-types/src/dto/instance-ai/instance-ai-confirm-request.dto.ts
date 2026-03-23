@@ -7,6 +7,7 @@ export class InstanceAiConfirmRequestDto extends Z.class({
 	approved: z.boolean(),
 	credentialId: z.string().optional(),
 	credentials: z.record(z.string()).optional(),
+	nodeCredentials: z.record(z.record(z.string())).optional(),
 	autoSetup: z.object({ credentialType: z.string() }).optional(),
 	userInput: z.string().optional(),
 	domainAccessAction: domainAccessActionSchema.optional(),

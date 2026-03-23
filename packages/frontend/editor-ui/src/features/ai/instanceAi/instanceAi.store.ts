@@ -645,6 +645,7 @@ export const useInstanceAiStore = defineStore('instanceAi', () => {
 		domainAccessAction?: string,
 		setupWorkflowData?: {
 			action?: 'apply' | 'test-trigger';
+			nodeCredentials?: Record<string, Record<string, string>>;
 			nodeParameters?: Record<string, Record<string, unknown>>;
 			testTriggerNode?: string;
 		},

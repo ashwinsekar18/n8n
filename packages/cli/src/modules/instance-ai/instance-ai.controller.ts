@@ -206,6 +206,7 @@ export class InstanceAiController {
 			approved: body.approved,
 			credentialId: body.credentialId,
 			credentials: body.credentials,
+			nodeCredentials: body.nodeCredentials,
 			autoSetup: body.autoSetup,
 			userInput: body.userInput,
 			domainAccessAction: body.domainAccessAction,

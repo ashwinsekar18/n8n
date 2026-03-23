@@ -179,8 +179,8 @@ export const workflowSetupNodeSchema = z.object({
 	}),
 	credentialType: z.string().optional(),
 	existingCredentials: z.array(z.object({ id: z.string(), name: z.string() })).optional(),
-	parameterIssues: z.record(z.array(z.string())).optional(),
 	isTrigger: z.boolean(),
+	isFirstTrigger: z.boolean().optional(),
 	isTestable: z.boolean().optional(),
 	isAutoApplied: z.boolean().optional(),
 	credentialTestResult: z
@@ -422,6 +422,9 @@ export interface InstanceAiConfirmResponse {
 	approved: boolean;
 	credentialId?: string;
 	credentials?: Record<string, string>;
+	/** Per-node credential assignments: `{ nodeName: { credType: credId } }`.
+	 *  Preferred over `credentials` when present — enables card-scoped selection. */
+	nodeCredentials?: Record<string, Record<string, string>>;
 	autoSetup?: { credentialType: string };
 	userInput?: string;
 	domainAccessAction?: DomainAccessAction;

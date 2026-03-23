@@ -18,8 +18,8 @@ const setupNodeSchema = z.object({
 	}),
 	credentialType: z.string().optional(),
 	existingCredentials: z.array(z.object({ id: z.string(), name: z.string() })).optional(),
-	parameterIssues: z.record(z.array(z.string())).optional(),
 	isTrigger: z.boolean(),
+	isFirstTrigger: z.boolean().optional(),
 	isTestable: z.boolean().optional(),
 	isAutoApplied: z.boolean().optional(),
 	credentialTestResult: z
@@ -40,8 +40,8 @@ type SetupRequest = z.infer<typeof setupNodeSchema>;
 
 /**
  * Build setup request(s) from a WorkflowJSON node.
- * Uses full credential type detection, parameter issue computation,
- * auto-selection of most recent credential, and trigger eligibility.
+ * Uses full credential type detection, auto-selection of most recent
+ * credential, and trigger eligibility.
  */
 async function buildSetupRequests(
 	context: InstanceAiContext,
@@ -49,6 +49,7 @@ async function buildSetupRequests(
 	triggerTestResult?: { status: 'success' | 'error'; error?: string },
 ): Promise<SetupRequest[]> {
 	if (!node.name) return [];
+	if (node.disabled) return [];
 
 	const typeVersion = node.typeVersion ?? 1;
 	const parameters = (node.parameters as Record<string, unknown>) ?? {};
@@ -83,14 +84,6 @@ async function buildSetupRequests(
 		} else if (nodeDesc?.credentials?.[0]?.name) {
 			credentialTypes = [nodeDesc.credentials[0].name];
 		}
-	}
-
-	// Compute parameter issues using backend service
-	let parameterIssues: Record<string, string[]> = {};
-	if (context.nodeService.getParameterIssues) {
-		parameterIssues = await context.nodeService
-			.getParameterIssues(node.type, typeVersion, parameters)
-			.catch(() => ({}));
 	}
 
 	const nodeId = node.id ?? nanoid();
@@ -150,8 +143,7 @@ async function buildSetupRequests(
 			}
 		}
 
-		// Only include if there's something to set up
-		if (!credentialType && !isTrigger && Object.keys(parameterIssues).length === 0) continue;
+		if (!credentialType && !isTrigger) continue;
 
 		const request: SetupRequest = {
 			node: {
@@ -187,7 +179,6 @@ async function buildSetupRequests(
 			},
 			...(credentialType ? { credentialType } : {}),
 			...(existingCredentials.length > 0 ? { existingCredentials } : {}),
-			...(Object.keys(parameterIssues).length > 0 ? { parameterIssues } : {}),
 			isTrigger,
 			...(isTestable ? { isTestable } : {}),
 			...(isAutoApplied ? { isAutoApplied } : {}),
@@ -201,31 +192,8 @@ async function buildSetupRequests(
 	return requests;
 }
 
-/**
- * Build a map of which credential types each node needs.
- * Used during Apply to assign credentials only to matching nodes.
- */
-function buildNodeCredentialMap(setupRequests: SetupRequest[]): Map<string, Set<string>> {
-	const map = new Map<string, Set<string>>();
-	for (const req of setupRequests) {
-		if (!req.credentialType) continue;
-		let nodeNames = map.get(req.credentialType);
-		if (!nodeNames) {
-			nodeNames = new Set();
-			map.set(req.credentialType, nodeNames);
-		}
-		for (const node of [req]) {
-			nodeNames.add(node.node.name);
-		}
-	}
-	return map;
-}
-
 export function createSetupWorkflowTool(context: InstanceAiContext) {
-	// Stable requestId across re-suspends so the frontend component persists
 	let currentRequestId: string | null = null;
-	// Keep the last setup requests to know which nodes need which credentials
-	let lastSetupRequests: SetupRequest[] = [];
 
 	return createTool({
 		id: 'setup-workflow',
@@ -255,7 +223,7 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 		resumeSchema: z.object({
 			approved: z.boolean(),
 			action: z.enum(['apply', 'test-trigger']).optional(),
-			credentials: z.record(z.string()).optional(),
+			credentials: z.record(z.record(z.string())).optional(),
 			nodeParameters: z.record(z.record(z.unknown())).optional(),
 			testTriggerNode: z.string().optional(),
 		}),
@@ -273,20 +241,22 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 
 				const setupRequests = allRequestArrays
 					.flat()
-					.filter(
-						(req) =>
-							req.credentialType !== undefined ||
-							req.isTrigger ||
-							(req.parameterIssues && Object.keys(req.parameterIssues).length > 0),
-					);
+					.filter((req) => req.credentialType !== undefined || req.isTrigger);
+
+				setupRequests.sort(
+					(a, b) =>
+						a.node.position[1] - b.node.position[1] || a.node.position[0] - b.node.position[0],
+				);
+
+				const firstTriggerReq = setupRequests.find((r) => r.isTrigger);
+				if (firstTriggerReq) {
+					firstTriggerReq.isFirstTrigger = true;
+				}
 
 				if (setupRequests.length === 0) {
 					return { success: true, reason: 'No nodes require setup.' };
 				}
 
-				// Store for later use during Apply
-				lastSetupRequests = setupRequests;
-				// Generate stable requestId for this tool invocation
 				currentRequestId = nanoid();
 
 				await suspend?.({
@@ -311,17 +281,13 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 
 			// State 3: Test trigger — apply creds/params, run trigger, re-suspend with result
 			if (resumeData.action === 'test-trigger' && resumeData.testTriggerNode) {
-				// Apply credentials to matching nodes only
 				if (resumeData.credentials) {
 					const workflowJson = await context.workflowService.getAsWorkflowJSON(input.workflowId);
-					const nodeCredMap = buildNodeCredentialMap(lastSetupRequests);
-
 					for (const node of workflowJson.nodes) {
 						if (!node.name) continue;
-						for (const [credType, credId] of Object.entries(resumeData.credentials)) {
-							const nodesForType = nodeCredMap.get(credType);
-							if (!nodesForType?.has(node.name)) continue;
-
+						const nodeCredsMap = resumeData.credentials[node.name];
+						if (!nodeCredsMap) continue;
+						for (const [credType, credId] of Object.entries(nodeCredsMap)) {
 							const cred = await context.credentialService.get(credId);
 							if (cred) {
 								node.credentials = {
@@ -366,14 +332,17 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 
 				const refreshedRequests = allRefreshed
 					.flat()
-					.filter(
-						(req) =>
-							req.credentialType !== undefined ||
-							req.isTrigger ||
-							(req.parameterIssues && Object.keys(req.parameterIssues).length > 0),
-					);
+					.filter((req) => req.credentialType !== undefined || req.isTrigger);
 
-				lastSetupRequests = refreshedRequests;
+				refreshedRequests.sort(
+					(a, b) =>
+						a.node.position[1] - b.node.position[1] || a.node.position[0] - b.node.position[0],
+				);
+
+				const firstTriggerRefreshed = refreshedRequests.find((r) => r.isTrigger);
+				if (firstTriggerRefreshed) {
+					firstTriggerRefreshed.isFirstTrigger = true;
+				}
 
 				// Re-suspend with SAME requestId so frontend component persists
 				await suspend?.({
@@ -392,14 +361,11 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 				const workflowJson = await context.workflowService.getAsWorkflowJSON(input.workflowId);
 
 				if (resumeData.credentials) {
-					const nodeCredMap = buildNodeCredentialMap(lastSetupRequests);
-
 					for (const node of workflowJson.nodes) {
 						if (!node.name) continue;
-						for (const [credType, credId] of Object.entries(resumeData.credentials)) {
-							const nodesForType = nodeCredMap.get(credType);
-							if (!nodesForType?.has(node.name)) continue;
-
+						const nodeCredsMap = resumeData.credentials[node.name];
+						if (!nodeCredsMap) continue;
+						for (const [credType, credId] of Object.entries(nodeCredsMap)) {
 							const cred = await context.credentialService.get(credId);
 							if (cred) {
 								node.credentials = {

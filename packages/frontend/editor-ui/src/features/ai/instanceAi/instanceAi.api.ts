@@ -79,6 +79,7 @@ export async function postConfirmation(
 	domainAccessAction?: string,
 	setupWorkflowData?: {
 		action?: 'apply' | 'test-trigger';
+		nodeCredentials?: Record<string, Record<string, string>>;
 		nodeParameters?: Record<string, Record<string, unknown>>;
 		testTriggerNode?: string;
 	},
@@ -95,6 +96,9 @@ export async function postConfirmation(
 				}
 			: {}),
 		...(setupWorkflowData?.action ? { action: setupWorkflowData.action } : {}),
+		...(setupWorkflowData?.nodeCredentials
+			? { nodeCredentials: setupWorkflowData.nodeCredentials }
+			: {}),
 		...(setupWorkflowData?.nodeParameters
 			? { nodeParameters: setupWorkflowData.nodeParameters }
 			: {}),

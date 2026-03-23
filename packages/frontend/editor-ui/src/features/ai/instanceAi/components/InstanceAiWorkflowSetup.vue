@@ -19,8 +19,8 @@ interface SetupCard {
 	credentialType?: string;
 	nodes: InstanceAiWorkflowSetupNode[];
 	isTrigger: boolean;
+	isFirstTrigger: boolean;
 	isTestable: boolean;
-	hasParamIssues: boolean;
 	credentialTestResult?: { success: boolean; message?: string };
 	isAutoApplied: boolean;
 }
@@ -58,21 +58,7 @@ const cards = computed((): SetupCard[] => {
 	const credGroups = new Map<string, InstanceAiWorkflowSetupNode[]>();
 
 	for (const req of props.setupRequests) {
-		const hasIssues =
-			req.parameterIssues !== undefined && Object.keys(req.parameterIssues).length > 0;
-
-		if (hasIssues) {
-			result.push({
-				id: `node-${req.node.id}`,
-				credentialType: req.credentialType,
-				nodes: [req],
-				isTrigger: req.isTrigger,
-				isTestable: req.isTestable ?? false,
-				hasParamIssues: true,
-				credentialTestResult: req.credentialTestResult,
-				isAutoApplied: req.isAutoApplied ?? false,
-			});
-		} else if (req.credentialType) {
+		if (req.credentialType) {
 			// Group HTTP Request nodes by credentialType + URL
 			const isHttpRequest =
 				req.node.type === HTTP_REQUEST_NODE_TYPE || req.node.type === HTTP_REQUEST_TOOL_NODE_TYPE;
@@ -96,27 +82,27 @@ const cards = computed((): SetupCard[] => {
 				id: `trigger-${req.node.id}`,
 				nodes: [req],
 				isTrigger: true,
+				isFirstTrigger: req.isFirstTrigger ?? false,
 				isTestable: req.isTestable ?? false,
-				hasParamIssues: false,
 				isAutoApplied: false,
 			});
 		}
 	}
 
-	for (const [, nodes] of credGroups) {
+	for (const [mapKey, nodes] of credGroups) {
 		const firstNode = nodes[0];
 		const credType = firstNode.credentialType!;
-		// Merge credential test results — use the first available
 		const testResult = nodes.find((n) => n.credentialTestResult)?.credentialTestResult;
 		const autoApplied = nodes.some((n) => n.isAutoApplied);
+		const hasFirstTrigger = nodes.some((n) => n.isFirstTrigger);
 
 		result.push({
-			id: `cred-${credType}-${nodes.map((n) => n.node.id).join('-')}`,
+			id: `cred-${mapKey}`,
 			credentialType: credType,
 			nodes,
 			isTrigger: nodes.some((n) => n.isTrigger),
+			isFirstTrigger: hasFirstTrigger,
 			isTestable: nodes.some((n) => n.isTestable),
-			hasParamIssues: false,
 			credentialTestResult: testResult,
 			isAutoApplied: autoApplied,
 		});
@@ -130,26 +116,19 @@ const cards = computed((): SetupCard[] => {
 // ---------------------------------------------------------------------------
 
 const totalSteps = computed(() => cards.value.length);
-const { currentStepIndex, isPrevDisabled, isNextDisabled, goToNext, goToPrev } =
+const { currentStepIndex, isPrevDisabled, isNextDisabled, goToNext, goToPrev, goToStep } =
 	useWizardNavigation({ totalSteps });
 
 const currentCard = computed(() => cards.value[currentStepIndex.value]);
 const showArrows = computed(() => totalSteps.value > 1);
 
-function goToStep(index: number) {
-	// Navigate by calling goToNext/goToPrev until we reach the target
-	while (currentStepIndex.value < index && !isNextDisabled.value) goToNext();
-	while (currentStepIndex.value > index && !isPrevDisabled.value) goToPrev();
-}
-
 // ---------------------------------------------------------------------------
-// State
+// State — selections keyed by CARD ID (not credential type)
 // ---------------------------------------------------------------------------
 
 const isSubmitted = ref(false);
 const isDeferred = ref(false);
 const selections = ref<Record<string, string | null>>({});
-const paramValues = ref<Record<string, Record<string, unknown>>>({});
 
 const triggerTestResults = computed(() => {
 	const results: Record<string, InstanceAiWorkflowSetupNode['triggerTestResult']> = {};
@@ -174,50 +153,47 @@ watch(
 );
 
 // ---------------------------------------------------------------------------
-// Auto-credential selection
+// Auto-credential selection — keyed by card ID
 // ---------------------------------------------------------------------------
 
 function initSelections() {
-	for (const req of props.setupRequests) {
-		if (!req.credentialType) continue;
-		if (selections.value[req.credentialType] !== undefined) continue;
+	for (const card of cards.value) {
+		if (!card.credentialType) continue;
+		if (selections.value[card.id] !== undefined) continue;
+
+		const firstReq = card.nodes[0];
+		const credType = card.credentialType;
 
 		// 1. Pre-fill from node's existing credential assignment
-		const existingOnNode = req.node.credentials?.[req.credentialType];
+		const existingOnNode = firstReq.node.credentials?.[credType];
 		if (existingOnNode?.id) {
-			selections.value[req.credentialType] = existingOnNode.id;
+			selections.value[card.id] = existingOnNode.id;
+		} else if (firstReq.existingCredentials?.length === 1) {
 			// 2. Auto-select if exactly one credential available
-		} else if (req.existingCredentials?.length === 1) {
-			selections.value[req.credentialType] = req.existingCredentials[0].id;
+			selections.value[card.id] = firstReq.existingCredentials[0].id;
+		} else if (card.isAutoApplied && firstReq.existingCredentials?.length) {
 			// 3. Auto-selected by backend (most recent)
-		} else if (req.isAutoApplied && req.existingCredentials?.length) {
-			selections.value[req.credentialType] = req.existingCredentials[0].id;
+			selections.value[card.id] = firstReq.existingCredentials[0].id;
 		} else {
-			selections.value[req.credentialType] = null;
+			selections.value[card.id] = null;
 		}
 	}
 }
 initSelections();
 
 // ---------------------------------------------------------------------------
-// Completion
+// Completion — first-trigger-only logic
 // ---------------------------------------------------------------------------
 
 function isCardComplete(card: SetupCard): boolean {
-	// Credential check
 	if (card.credentialType) {
-		const selectedId = selections.value[card.credentialType];
+		const selectedId = selections.value[card.id];
 		if (!selectedId) return false;
-
-		// Credential test must pass (if result available)
 		if (card.credentialTestResult && !card.credentialTestResult.success) return false;
 	}
 
-	// Parameter issues check
-	if (card.hasParamIssues) return false;
-
-	// Trigger check — only if testable
-	if (card.isTestable && card.isTrigger) {
+	// Trigger check — only the first trigger requires execution
+	if (card.isTestable && card.isTrigger && card.isFirstTrigger) {
 		const triggerNode = card.nodes.find((n) => n.isTrigger);
 		if (triggerNode && !triggerTestResults.value[triggerNode.node.name]) return false;
 	}
@@ -226,19 +202,35 @@ function isCardComplete(card: SetupCard): boolean {
 }
 
 const allCredentialsSelected = computed(() =>
-	cards.value
-		.filter((c) => c.credentialType)
-		.every((c) => selections.value[c.credentialType!] !== null),
+	cards.value.filter((c) => c.credentialType).every((c) => selections.value[c.id] !== null),
 );
 
 // ---------------------------------------------------------------------------
-// Auto-advance: when current card becomes complete, go to next incomplete
+// Auto-advance: only when a card transitions from incomplete → complete
+// (not when navigating to an already-complete card)
 // ---------------------------------------------------------------------------
+
+const userNavigated = ref(false);
+
+function wrappedGoToNext() {
+	userNavigated.value = true;
+	goToNext();
+}
+
+function wrappedGoToPrev() {
+	userNavigated.value = true;
+	goToPrev();
+}
 
 watch(
 	() => currentCard.value && isCardComplete(currentCard.value),
-	(complete) => {
-		if (!complete) return;
+	(complete, prevComplete) => {
+		// Only auto-advance on a false→true transition (credential was just selected)
+		// Skip if user just navigated to a card that was already complete
+		if (!complete || prevComplete || userNavigated.value) {
+			userNavigated.value = false;
+			return;
+		}
 		const nextIncomplete = cards.value.findIndex(
 			(c, i) => i > currentStepIndex.value && !isCardComplete(c),
 		);
@@ -248,7 +240,6 @@ watch(
 	},
 );
 
-// On mount, skip to first incomplete card
 onMounted(() => {
 	const firstIncomplete = cards.value.findIndex((c) => !isCardComplete(c));
 	if (firstIncomplete > 0) {
@@ -286,14 +277,14 @@ function cardNodeUi(card: SetupCard): INodeUi {
 	return toNodeUi(card.nodes[0]);
 }
 
-/** True when this card only has a trigger (no credentials, no params) */
+/** True when this card only has a trigger (no credentials) */
 function isTriggerOnly(card: SetupCard): boolean {
-	return card.isTrigger && !card.credentialType && !card.hasParamIssues;
+	return card.isTrigger && !card.credentialType;
 }
 
-/** Use credential icon when it's a credential-only card (no params shown) */
+/** Use credential icon when it's a credential card */
 function useCredentialIcon(card: SetupCard): boolean {
-	return !!card.credentialType && !card.hasParamIssues && !isTriggerOnly(card);
+	return !!card.credentialType && !isTriggerOnly(card);
 }
 
 const nodeNames = computed(() => {
@@ -304,16 +295,36 @@ const nodeNames = computed(() => {
 
 const nodeNamesTooltip = computed(() => nodeNames.value.join(', '));
 
-/** Credential test status icon for the card header */
 function getCredTestIcon(card: SetupCard): 'spinner' | 'check' | 'triangle-alert' | null {
 	if (!card.credentialType) return null;
-	const selectedId = selections.value[card.credentialType];
+	const selectedId = selections.value[card.id];
 	if (!selectedId) return null;
 
 	if (card.isAutoApplied && !card.credentialTestResult) return 'spinner';
 	if (card.credentialTestResult?.success) return 'check';
 	if (card.credentialTestResult && !card.credentialTestResult.success) return 'triangle-alert';
 	return null;
+}
+
+// ---------------------------------------------------------------------------
+// Build per-node credential mapping from card-scoped selections
+// ---------------------------------------------------------------------------
+
+function buildNodeCredentials(): Record<string, Record<string, string>> {
+	const result: Record<string, Record<string, string>> = {};
+	for (const card of cards.value) {
+		if (!card.credentialType) continue;
+		const selectedId = selections.value[card.id];
+		if (!selectedId) continue;
+
+		for (const req of card.nodes) {
+			if (!result[req.node.name]) {
+				result[req.node.name] = {};
+			}
+			result[req.node.name][card.credentialType] = selectedId;
+		}
+	}
+	return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -326,40 +337,34 @@ function onCredentialSelected(card: SetupCard, updateInfo: INodeUpdateProperties
 	const credentialId = typeof credentialData === 'string' ? undefined : credentialData?.id;
 
 	if (credentialId) {
-		selections.value[card.credentialType] = credentialId;
+		selections.value[card.id] = credentialId;
 	} else {
-		selections.value[card.credentialType] = null;
+		selections.value[card.id] = null;
 	}
 }
 
 function handleTestTrigger(nodeName: string) {
-	const credentials: Record<string, string> = {};
-	for (const [type, id] of Object.entries(selections.value)) {
-		if (id) credentials[type] = id;
-	}
+	const nodeCredentials = buildNodeCredentials();
 
 	store.resolveConfirmation(props.requestId, 'approved');
 	void store.confirmAction(
 		props.requestId,
 		true,
 		undefined,
-		credentials,
+		undefined,
 		undefined,
 		undefined,
 		undefined,
 		{
 			action: 'test-trigger',
 			testTriggerNode: nodeName,
-			nodeParameters: Object.keys(paramValues.value).length > 0 ? paramValues.value : undefined,
+			nodeCredentials,
 		},
 	);
 }
 
 function handleApply() {
-	const credentials: Record<string, string> = {};
-	for (const [type, id] of Object.entries(selections.value)) {
-		if (id) credentials[type] = id;
-	}
+	const nodeCredentials = buildNodeCredentials();
 
 	isSubmitted.value = true;
 	store.resolveConfirmation(props.requestId, 'approved');
@@ -367,13 +372,13 @@ function handleApply() {
 		props.requestId,
 		true,
 		undefined,
-		credentials,
+		undefined,
 		undefined,
 		undefined,
 		undefined,
 		{
 			action: 'apply',
-			nodeParameters: Object.keys(paramValues.value).length > 0 ? paramValues.value : undefined,
+			nodeCredentials,
 		},
 	);
 }
@@ -394,7 +399,7 @@ function handleLater() {
 				data-test-id="instance-ai-workflow-setup-card"
 				:class="[$style.card, { [$style.completed]: isCardComplete(currentCard) }]"
 			>
-				<!-- Header (matches BuilderSetupCard) -->
+				<!-- Header -->
 				<header :class="$style.header">
 					<CredentialIcon
 						v-if="useCredentialIcon(currentCard)"
@@ -406,7 +411,6 @@ function handleLater() {
 						{{ getCardTitle(currentCard) }}
 					</N8nText>
 
-					<!-- Credential test status icon -->
 					<N8nIcon
 						v-if="getCredTestIcon(currentCard) === 'spinner'"
 						icon="spinner"
@@ -438,7 +442,7 @@ function handleLater() {
 					</N8nText>
 				</header>
 
-				<!-- Content (matches BuilderSetupCard) -->
+				<!-- Content -->
 				<div v-if="!isTriggerOnly(currentCard)" :class="$style.content">
 					<div v-if="currentCard.credentialType" :class="$style.credentialContainer">
 						<NodeCredentials
@@ -468,28 +472,9 @@ function handleLater() {
 							</template>
 						</NodeCredentials>
 					</div>
-
-					<!-- Parameter issues (per-node cards) -->
-					<div
-						v-if="currentCard.hasParamIssues && currentCard.nodes[0]?.parameterIssues"
-						:class="$style.parameterIssues"
-					>
-						<N8nText size="small" color="text-light">
-							{{ i18n.baseText('instanceAi.workflowSetup.parameterIssues') }}
-						</N8nText>
-						<ul :class="$style.issueList">
-							<li
-								v-for="(issues, paramName) in currentCard.nodes[0].parameterIssues"
-								:key="paramName"
-							>
-								<N8nText size="small" color="text-dark" bold>{{ paramName }}:</N8nText>
-								{{ issues.join(', ') }}
-							</li>
-						</ul>
-					</div>
 				</div>
 
-				<!-- Footer (matches BuilderSetupCard) -->
+				<!-- Footer -->
 				<footer :class="$style.footer">
 					<div :class="$style.footerNav">
 						<N8nButton
@@ -500,7 +485,7 @@ function handleLater() {
 							:disabled="isPrevDisabled"
 							data-test-id="instance-ai-workflow-setup-prev"
 							aria-label="Previous step"
-							@click="goToPrev"
+							@click="wrappedGoToPrev"
 						>
 							<N8nIcon icon="chevron-left" size="xsmall" />
 						</N8nButton>
@@ -515,7 +500,7 @@ function handleLater() {
 							:disabled="isNextDisabled"
 							data-test-id="instance-ai-workflow-setup-next"
 							aria-label="Next step"
-							@click="goToNext"
+							@click="wrappedGoToNext"
 						>
 							<N8nIcon icon="chevron-right" size="xsmall" />
 						</N8nButton>
@@ -532,13 +517,11 @@ function handleLater() {
 						/>
 
 						<N8nButton
-							v-if="currentCard.isTestable && currentCard.isTrigger"
+							v-if="currentCard.isTestable && currentCard.isTrigger && currentCard.isFirstTrigger"
 							size="small"
 							:class="$style.actionButton"
 							:label="i18n.baseText('instanceAi.workflowSetup.testTrigger')"
-							:disabled="
-								currentCard.credentialType ? selections[currentCard.credentialType] === null : false
-							"
+							:disabled="currentCard.credentialType ? selections[currentCard.id] === null : false"
 							data-test-id="instance-ai-workflow-setup-test-trigger"
 							@click="handleTestTrigger(currentCard.nodes.find((n) => n.isTrigger)!.node.name)"
 						/>
@@ -570,8 +553,6 @@ function handleLater() {
 </template>
 
 <style lang="scss" module>
-/* Matches BuilderSetupCard.vue from the chat sidebar */
-
 .root {
 	border-top: var(--border);
 	background: var(--color--background--shade-1);
@@ -625,19 +606,6 @@ function handleLater() {
 	:global(.node-credentials) {
 		margin-top: 0;
 	}
-}
-
-.parameterIssues {
-	display: flex;
-	flex-direction: column;
-	gap: var(--spacing--4xs);
-}
-
-.issueList {
-	margin: 0;
-	padding-left: var(--spacing--sm);
-	font-size: var(--font-size--2xs);
-	color: var(--color--text--tint-1);
 }
 
 .footer {

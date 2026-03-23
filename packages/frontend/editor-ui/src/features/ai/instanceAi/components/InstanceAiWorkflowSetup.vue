@@ -376,6 +376,7 @@ function getTriggerTestStatusClass(
 						color="success"
 					>
 						<N8nIcon icon="check" size="large" />
+						{{ i18n.baseText('generic.complete') }}
 					</N8nText>
 					<!-- Credential test status -->
 					<template
@@ -406,17 +407,18 @@ function getTriggerTestStatusClass(
 					</N8nText>
 
 					<!-- Credential picker -->
-					<CredentialPicker
-						v-if="currentCard.credentialType"
-						:key="currentCard.credentialType"
-						:app-name="getDisplayName(currentCard.credentialType)"
-						:credential-type="currentCard.credentialType"
-						:selected-credential-id="selections[currentCard.credentialType]"
-						:project-id="props.projectId"
-						create-button-variant="outline"
-						@credential-selected="handleCredentialSelected(currentCard.credentialType!, $event)"
-						@credential-deselected="handleCredentialDeselected(currentCard.credentialType!)"
-					/>
+					<div v-if="currentCard.credentialType" :class="$style.credentialContainer">
+						<CredentialPicker
+							:key="currentCard.credentialType"
+							:app-name="getDisplayName(currentCard.credentialType)"
+							:credential-type="currentCard.credentialType"
+							:selected-credential-id="selections[currentCard.credentialType]"
+							:project-id="props.projectId"
+							create-button-variant="outline"
+							@credential-selected="handleCredentialSelected(currentCard.credentialType!, $event)"
+							@credential-deselected="handleCredentialDeselected(currentCard.credentialType!)"
+						/>
+					</div>
 
 					<!-- Node list for grouped cards -->
 					<div
@@ -516,6 +518,7 @@ function getTriggerTestStatusClass(
 						</button>
 						<N8nButton
 							size="small"
+							:class="$style.actionButton"
 							:label="i18n.baseText('instanceAi.workflowSetup.apply')"
 							:disabled="!allCredentialsSelected"
 							data-test-id="instance-ai-workflow-setup-apply-button"
@@ -584,6 +587,15 @@ function getTriggerTestStatusClass(
 	flex-direction: column;
 	gap: var(--spacing--sm);
 	padding: 0 var(--spacing--sm);
+}
+
+.credentialContainer {
+	display: flex;
+	flex-direction: column;
+
+	:global(.node-credentials) {
+		margin-top: 0;
+	}
 
 	:global([data-test-id='create-credential']) {
 		width: auto;
@@ -651,6 +663,10 @@ function getTriggerTestStatusClass(
 	to {
 		transform: rotate(360deg);
 	}
+}
+
+.actionButton {
+	--button--font-size: var(--font-size--2xs);
 }
 
 .secondaryButton {

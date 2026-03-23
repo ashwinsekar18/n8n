@@ -294,28 +294,67 @@ export function sortByExecutionOrder(
 
 // ── Workflow mutation ───────────────────────────────────────────────────────
 
+/** Result of applying credentials or parameters to workflow nodes. */
+export interface ApplyResult {
+	applied: string[];
+	failed: Array<{ nodeName: string; error: string }>;
+}
+
 /** Apply per-node credentials from resume data to a workflow. */
 export async function applyNodeCredentials(
 	context: InstanceAiContext,
 	workflowId: string,
 	nodeCredentials: Record<string, Record<string, string>>,
-) {
+): Promise<ApplyResult> {
+	const result: ApplyResult = { applied: [], failed: [] };
 	const workflowJson = await context.workflowService.getAsWorkflowJSON(workflowId);
+
 	for (const node of workflowJson.nodes) {
 		if (!node.name) continue;
 		const credsMap = nodeCredentials[node.name];
 		if (!credsMap) continue;
+
+		let nodeSucceeded = true;
 		for (const [credType, credId] of Object.entries(credsMap)) {
-			const cred = await context.credentialService.get(credId);
-			if (cred) {
-				node.credentials = {
-					...node.credentials,
-					[credType]: { id: cred.id, name: cred.name },
-				};
+			try {
+				const cred = await context.credentialService.get(credId);
+				if (cred) {
+					node.credentials = {
+						...node.credentials,
+						[credType]: { id: cred.id, name: cred.name },
+					};
+				} else {
+					nodeSucceeded = false;
+					result.failed.push({
+						nodeName: node.name,
+						error: `Credential ${credId} (type: ${credType}) not found — it may have been deleted`,
+					});
+				}
+			} catch (err) {
+				nodeSucceeded = false;
+				result.failed.push({
+					nodeName: node.name,
+					error: `Failed to resolve credential ${credId} (type: ${credType}): ${err instanceof Error ? err.message : 'Unknown error'}`,
+				});
 			}
 		}
+		if (nodeSucceeded) {
+			result.applied.push(node.name);
+		}
 	}
-	await context.workflowService.updateFromWorkflowJSON(workflowId, workflowJson);
+
+	try {
+		await context.workflowService.updateFromWorkflowJSON(workflowId, workflowJson);
+	} catch (err) {
+		// If the final save fails, mark all previously-applied nodes as failed
+		const saveError = `Failed to save workflow after credential apply: ${err instanceof Error ? err.message : 'Unknown error'}`;
+		for (const nodeName of result.applied) {
+			result.failed.push({ nodeName, error: saveError });
+		}
+		result.applied = [];
+	}
+
+	return result;
 }
 
 /** Apply per-node parameter values from resume data to a workflow. */
@@ -323,18 +362,40 @@ export async function applyNodeParameters(
 	context: InstanceAiContext,
 	workflowId: string,
 	nodeParameters: Record<string, Record<string, unknown>>,
-) {
+): Promise<ApplyResult> {
+	const result: ApplyResult = { applied: [], failed: [] };
 	const workflowJson = await context.workflowService.getAsWorkflowJSON(workflowId);
+
 	for (const node of workflowJson.nodes) {
 		if (!node.name) continue;
 		const params = nodeParameters[node.name];
 		if (!params) continue;
-		node.parameters = {
-			...(node.parameters ?? {}),
-			...params,
-		} as IDataObject;
+
+		try {
+			node.parameters = {
+				...(node.parameters ?? {}),
+				...params,
+			} as IDataObject;
+			result.applied.push(node.name);
+		} catch (err) {
+			result.failed.push({
+				nodeName: node.name,
+				error: `Failed to merge parameters: ${err instanceof Error ? err.message : 'Unknown error'}`,
+			});
+		}
 	}
-	await context.workflowService.updateFromWorkflowJSON(workflowId, workflowJson);
+
+	try {
+		await context.workflowService.updateFromWorkflowJSON(workflowId, workflowJson);
+	} catch (err) {
+		const saveError = `Failed to save workflow after parameter apply: ${err instanceof Error ? err.message : 'Unknown error'}`;
+		for (const nodeName of result.applied) {
+			result.failed.push({ nodeName, error: saveError });
+		}
+		result.applied = [];
+	}
+
+	return result;
 }
 
 // ── Partial-apply reporting ──────────────────────────────────────────────────
@@ -384,27 +445,6 @@ export function buildCompletedReport(
 			result.push({ nodeName, parametersSet: entry.parameterNames });
 		}
 	}
-	return result;
-}
-
-/** Build a report of nodes that were skipped during partial apply. */
-export function buildSkippedReport(
-	setupRequests: SetupRequest[],
-	skippedNodeNames?: string[],
-): Array<{ nodeName: string; credentialType?: string }> {
-	if (!skippedNodeNames || skippedNodeNames.length === 0) return [];
-
-	const skippedSet = new Set(skippedNodeNames);
-	const result: Array<{ nodeName: string; credentialType?: string }> = [];
-
-	for (const req of setupRequests) {
-		if (!skippedSet.has(req.node.name)) continue;
-		result.push({
-			nodeName: req.node.name,
-			...(req.credentialType ? { credentialType: req.credentialType } : {}),
-		});
-	}
-
 	return result;
 }
 

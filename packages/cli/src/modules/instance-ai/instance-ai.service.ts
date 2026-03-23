@@ -79,10 +79,9 @@ interface ConfirmationData {
 	autoSetup?: { credentialType: string };
 	userInput?: string;
 	domainAccessAction?: string;
-	action?: 'apply' | 'partial-apply' | 'test-trigger';
+	action?: 'apply' | 'test-trigger';
 	nodeParameters?: Record<string, Record<string, unknown>>;
 	testTriggerNode?: string;
-	skippedNodeNames?: string[];
 }
 
 interface PendingConfirmation {
@@ -949,7 +948,6 @@ export class InstanceAiService {
 			...(data.action ? { action: data.action } : {}),
 			...(data.nodeParameters ? { nodeParameters: data.nodeParameters } : {}),
 			...(data.testTriggerNode ? { testTriggerNode: data.testTriggerNode } : {}),
-			...(data.skippedNodeNames ? { skippedNodeNames: data.skippedNodeNames } : {}),
 		};
 
 		// Create snapshot storage for saving agent tree after resumed run completes

@@ -68,9 +68,8 @@ export const setupSuspendSchema = z.object({
 
 export const setupResumeSchema = z.object({
 	approved: z.boolean(),
-	action: z.enum(['apply', 'partial-apply', 'test-trigger']).optional(),
+	action: z.enum(['apply', 'test-trigger']).optional(),
 	credentials: z.record(z.record(z.string())).optional(),
 	nodeParameters: z.record(z.record(z.unknown())).optional(),
 	testTriggerNode: z.string().optional(),
-	skippedNodeNames: z.array(z.string()).optional(),
 });

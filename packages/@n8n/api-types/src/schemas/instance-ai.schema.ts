@@ -448,10 +448,9 @@ export interface InstanceAiConfirmResponse {
 	autoSetup?: { credentialType: string };
 	userInput?: string;
 	domainAccessAction?: DomainAccessAction;
-	action?: 'apply' | 'partial-apply' | 'test-trigger';
+	action?: 'apply' | 'test-trigger';
 	nodeParameters?: Record<string, Record<string, unknown>>;
 	testTriggerNode?: string;
-	skippedNodeNames?: string[];
 }
 
 // ---------------------------------------------------------------------------

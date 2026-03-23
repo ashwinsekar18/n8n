@@ -516,20 +516,6 @@ function buildNodeCredentials(): Record<string, Record<string, string>> {
 	return result;
 }
 
-/** Collect node names from incomplete cards for partial-apply reporting. */
-function buildSkippedNodeNames(): string[] {
-	const names: string[] = [];
-	for (const card of cards.value) {
-		if (isCardComplete(card)) continue;
-		for (const req of card.nodes) {
-			if (!names.includes(req.node.name)) {
-				names.push(req.node.name);
-			}
-		}
-	}
-	return names;
-}
-
 /** Build nodeParameters from paramValues (only include entries with values). */
 function buildNodeParameters(): Record<string, Record<string, unknown>> | undefined {
 	const result: Record<string, Record<string, unknown>> = {};
@@ -642,11 +628,9 @@ function applyToCanvas(
 function handleApply() {
 	const nodeCredentials = buildNodeCredentials();
 	const nodeParameters = buildNodeParameters();
-	const partial = isPartialApply.value;
-	const skippedNodeNames = partial ? buildSkippedNodeNames() : undefined;
 
 	isSubmitted.value = true;
-	isPartial.value = partial;
+	isPartial.value = isPartialApply.value;
 
 	// Update canvas immediately so nodes reflect the applied state
 	applyToCanvas(nodeCredentials, nodeParameters);
@@ -661,10 +645,9 @@ function handleApply() {
 		undefined,
 		undefined,
 		{
-			action: partial ? 'partial-apply' : 'apply',
+			action: 'apply',
 			nodeCredentials,
 			nodeParameters,
-			skippedNodeNames,
 		},
 	);
 }

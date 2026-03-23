@@ -11,8 +11,7 @@ export class InstanceAiConfirmRequestDto extends Z.class({
 	autoSetup: z.object({ credentialType: z.string() }).optional(),
 	userInput: z.string().optional(),
 	domainAccessAction: domainAccessActionSchema.optional(),
-	action: z.enum(['apply', 'partial-apply', 'test-trigger']).optional(),
+	action: z.enum(['apply', 'test-trigger']).optional(),
 	nodeParameters: z.record(z.record(z.unknown())).optional(),
 	testTriggerNode: z.string().optional(),
-	skippedNodeNames: z.array(z.string()).optional(),
 }) {}

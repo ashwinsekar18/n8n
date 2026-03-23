@@ -644,11 +644,10 @@ export const useInstanceAiStore = defineStore('instanceAi', () => {
 		userInput?: string,
 		domainAccessAction?: string,
 		setupWorkflowData?: {
-			action?: 'apply' | 'partial-apply' | 'test-trigger';
+			action?: 'apply' | 'test-trigger';
 			nodeCredentials?: Record<string, Record<string, string>>;
 			nodeParameters?: Record<string, Record<string, unknown>>;
 			testTriggerNode?: string;
-			skippedNodeNames?: string[];
 		},
 	): Promise<void> {
 		try {

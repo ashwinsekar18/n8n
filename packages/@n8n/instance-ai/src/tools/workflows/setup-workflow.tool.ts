@@ -13,7 +13,7 @@ import {
 	applyNodeCredentials,
 	applyNodeParameters,
 	buildCompletedReport,
-	buildSkippedReport,
+	type ApplyResult,
 } from './setup-workflow.service';
 import type { InstanceAiContext } from '../../types';
 
@@ -37,6 +37,7 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 			deferred: z.boolean().optional(),
 			partial: z.boolean().optional(),
 			reason: z.string().optional(),
+			error: z.string().optional(),
 			completedNodes: z
 				.array(
 					z.object({
@@ -51,6 +52,14 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 					z.object({
 						nodeName: z.string(),
 						credentialType: z.string().optional(),
+					}),
+				)
+				.optional(),
+			failedNodes: z
+				.array(
+					z.object({
+						nodeName: z.string(),
+						error: z.string(),
 					}),
 				)
 				.optional(),
@@ -166,49 +175,81 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 				return { success: false };
 			}
 
-			// State 4: Apply (full or partial) — save credentials and parameters
-			preTestSnapshot = null;
-			if (resumeData.credentials) {
-				await applyNodeCredentials(context, input.workflowId, resumeData.credentials);
-			}
-			if (resumeData.nodeParameters) {
-				await applyNodeParameters(context, input.workflowId, resumeData.nodeParameters);
-			}
+			// State 4: Apply — save credentials and parameters
+			try {
+				preTestSnapshot = null;
 
-			// Fetch updated workflow to include in response so the frontend can refresh the canvas
-			const updatedWorkflow = await context.workflowService.getAsWorkflowJSON(input.workflowId);
-			const updatedNodes = updatedWorkflow.nodes.map((node) => ({
-				id: node.id,
-				name: node.name,
-				type: node.type,
-				typeVersion: node.typeVersion,
-				position: node.position,
-				parameters: node.parameters as Record<string, unknown> | undefined,
-				credentials: node.credentials,
-				disabled: node.disabled,
-			}));
-			const updatedConnections = updatedWorkflow.connections as Record<string, unknown>;
+				// Apply credentials and parameters independently — failures in one
+				// should not prevent the other from being attempted
+				const allFailedNodes: Array<{ nodeName: string; error: string }> = [];
 
-			if (resumeData.action === 'partial-apply') {
+				let credResult: ApplyResult | undefined;
+				if (resumeData.credentials) {
+					credResult = await applyNodeCredentials(
+						context,
+						input.workflowId,
+						resumeData.credentials,
+					);
+					allFailedNodes.push(...credResult.failed);
+				}
+
+				let paramResult: ApplyResult | undefined;
+				if (resumeData.nodeParameters) {
+					paramResult = await applyNodeParameters(
+						context,
+						input.workflowId,
+						resumeData.nodeParameters,
+					);
+					allFailedNodes.push(...paramResult.failed);
+				}
+
+				const failedNodes = allFailedNodes.length > 0 ? allFailedNodes : undefined;
+
+				// Fetch updated workflow to include in response so the frontend can refresh the canvas
+				const updatedWorkflow = await context.workflowService.getAsWorkflowJSON(input.workflowId);
+				const updatedNodes = updatedWorkflow.nodes.map((node) => ({
+					id: node.id,
+					name: node.name,
+					type: node.type,
+					typeVersion: node.typeVersion,
+					position: node.position,
+					parameters: node.parameters as Record<string, unknown> | undefined,
+					credentials: node.credentials,
+					disabled: node.disabled,
+				}));
+				const updatedConnections = updatedWorkflow.connections as Record<string, unknown>;
+
+				// Re-analyze to determine if any nodes still need setup
 				const remainingRequests = await analyzeWorkflow(context, input.workflowId);
 				const completedNodes = buildCompletedReport(
 					resumeData.credentials,
 					resumeData.nodeParameters,
 				);
-				const skippedNodes = buildSkippedReport(remainingRequests, resumeData.skippedNodeNames);
 
+				if (remainingRequests.length > 0) {
+					const skippedNodes = remainingRequests.map((r) => ({
+						nodeName: r.node.name,
+						credentialType: r.credentialType,
+					}));
+					return {
+						success: true,
+						partial: true,
+						reason: `Applied setup for ${String(completedNodes.length)} node(s), ${String(skippedNodes.length)} node(s) still need configuration.`,
+						completedNodes,
+						skippedNodes,
+						failedNodes,
+						updatedNodes,
+						updatedConnections,
+					};
+				}
+
+				return { success: true, completedNodes, failedNodes, updatedNodes, updatedConnections };
+			} catch (err) {
 				return {
-					success: true,
-					partial: true,
-					reason: `Applied setup for ${String(completedNodes.length)} node(s), ${String(skippedNodes.length)} node(s) still need configuration.`,
-					completedNodes,
-					skippedNodes,
-					updatedNodes,
-					updatedConnections,
+					success: false,
+					error: `Workflow apply failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
 				};
 			}
-
-			return { success: true, updatedNodes, updatedConnections };
 		},
 	});
 }

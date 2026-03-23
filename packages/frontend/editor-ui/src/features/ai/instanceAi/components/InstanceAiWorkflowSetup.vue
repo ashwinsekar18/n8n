@@ -1,14 +1,35 @@
 <script lang="ts" setup>
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { N8nButton, N8nIcon, N8nText, type IconName } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
 import type { InstanceAiWorkflowSetupNode, InstanceAiCredentialFlow } from '@n8n/api-types';
+import type { ICredentialsDecrypted } from 'n8n-workflow';
 import { useInstanceAiStore } from '../instanceAi.store';
 import { useCredentialsStore } from '@/features/credentials/credentials.store';
 import CredentialPicker from '@/features/credentials/components/CredentialPicker/CredentialPicker.vue';
 import CredentialIcon from '@/features/credentials/components/CredentialIcon.vue';
 import WizardNavigationFooter from '@/features/ai/shared/components/WizardNavigationFooter.vue';
 import { useWizardNavigation } from '@/features/ai/shared/composables/useWizardNavigation';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** A single card in the wizard — grouped by credential type or per-node */
+interface SetupCard {
+	id: string;
+	credentialType?: string;
+	/** All setup nodes covered by this card */
+	nodes: InstanceAiWorkflowSetupNode[];
+	/** True when any node in this card is a trigger */
+	isTrigger: boolean;
+	/** True when this card has per-node parameter issues (not grouped) */
+	hasParamIssues: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Props
+// ---------------------------------------------------------------------------
 
 const props = defineProps<{
 	requestId: string;
@@ -23,50 +44,232 @@ const i18n = useI18n();
 const store = useInstanceAiStore();
 const credentialsStore = useCredentialsStore();
 
-const totalSteps = computed(() => props.setupRequests.length);
+// ---------------------------------------------------------------------------
+// Card grouping (smart + adaptive splitting)
+// ---------------------------------------------------------------------------
 
+/** Build grouped cards from flat setup requests.
+ *  - Nodes with parameterIssues → per-node card (even if they share a credential type)
+ *  - Nodes with credentialType and no param issues → grouped by credential type
+ *  - Trigger-only nodes (no credential, no param issues) → trigger card
+ */
+const cards = computed((): SetupCard[] => {
+	const result: SetupCard[] = [];
+	const credGroups = new Map<string, InstanceAiWorkflowSetupNode[]>();
+
+	for (const req of props.setupRequests) {
+		const hasIssues =
+			req.parameterIssues !== undefined && Object.keys(req.parameterIssues).length > 0;
+
+		if (hasIssues) {
+			// Per-node card — has parameter issues
+			result.push({
+				id: `node-${req.node.id}`,
+				credentialType: req.credentialType,
+				nodes: [req],
+				isTrigger: req.isTrigger,
+				hasParamIssues: true,
+			});
+		} else if (req.credentialType) {
+			// Group by credential type
+			const existing = credGroups.get(req.credentialType);
+			if (existing) {
+				existing.push(req);
+			} else {
+				credGroups.set(req.credentialType, [req]);
+			}
+		} else if (req.isTrigger) {
+			// Trigger-only card
+			result.push({
+				id: `trigger-${req.node.id}`,
+				nodes: [req],
+				isTrigger: true,
+				hasParamIssues: false,
+			});
+		}
+	}
+
+	// Add grouped credential cards
+	for (const [credType, nodes] of credGroups) {
+		result.push({
+			id: `cred-${credType}`,
+			credentialType: credType,
+			nodes,
+			isTrigger: nodes.some((n) => n.isTrigger),
+			hasParamIssues: false,
+		});
+	}
+
+	return result;
+});
+
+// ---------------------------------------------------------------------------
+// Wizard navigation
+// ---------------------------------------------------------------------------
+
+const totalSteps = computed(() => cards.value.length);
 const { currentStepIndex, isPrevDisabled, isNextDisabled, goToNext, goToPrev } =
 	useWizardNavigation({ totalSteps });
+
+const currentCard = computed(() => cards.value[currentStepIndex.value]);
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
 
 const isSubmitted = ref(false);
 const isDeferred = ref(false);
 
-// Track credential selections: credentialType → credentialId
-const selections = ref<Record<string, string | null>>(
-	Object.fromEntries(
-		props.setupRequests.filter((r) => r.credentialType).map((r) => [r.credentialType!, null]),
-	),
-);
+// Credential selections: credentialType → credentialId
+const selections = ref<Record<string, string | null>>({});
+
+// Credential test status: credentialId → status
+const credentialTestStatus = ref<Record<string, 'testing' | 'success' | 'error'>>({});
+
+// Trigger test results (from backend re-suspend): nodeName → result
+const triggerTestResults = computed(() => {
+	const results: Record<string, InstanceAiWorkflowSetupNode['triggerTestResult']> = {};
+	for (const req of props.setupRequests) {
+		if (req.triggerTestResult) {
+			results[req.node.name] = req.triggerTestResult;
+		}
+	}
+	return results;
+});
 
 // Track parameter values: nodeName → { paramName: value }
 const paramValues = ref<Record<string, Record<string, unknown>>>({});
 
-const currentRequest = computed(() => props.setupRequests[currentStepIndex.value]);
-
-const allCredentialsSelected = computed(() =>
-	props.setupRequests
-		.filter((r) => r.credentialType)
-		.every((r) => selections.value[r.credentialType!] !== null),
+// Sticky card tracking — cards that have been shown stay visible
+const shownCardIds = ref(new Set<string>());
+watch(
+	cards,
+	(newCards) => {
+		for (const card of newCards) {
+			shownCardIds.value.add(card.id);
+		}
+	},
+	{ immediate: true },
 );
 
-const currentCredentialSelected = computed(() => {
-	if (!currentRequest.value?.credentialType) return true;
-	return selections.value[currentRequest.value.credentialType] !== null;
-});
+// ---------------------------------------------------------------------------
+// Auto-credential selection
+// ---------------------------------------------------------------------------
+
+function initSelections() {
+	for (const req of props.setupRequests) {
+		if (!req.credentialType) continue;
+		if (selections.value[req.credentialType] !== undefined) continue;
+
+		// Auto-select if exactly one existing credential
+		if (req.existingCredentials?.length === 1) {
+			selections.value[req.credentialType] = req.existingCredentials[0].id;
+			// Auto-test the credential
+			void testCredentialInBackground(req.existingCredentials[0].id, req.credentialType);
+		} else {
+			selections.value[req.credentialType] = null;
+		}
+	}
+}
+initSelections();
+
+// ---------------------------------------------------------------------------
+// Credential testing
+// ---------------------------------------------------------------------------
+
+async function testCredentialInBackground(credentialId: string, credentialType: string) {
+	const cred = credentialsStore.getCredentialById(credentialId);
+	if (!cred) return;
+
+	credentialTestStatus.value[credentialId] = 'testing';
+	try {
+		const result = await credentialsStore.testCredential({
+			id: cred.id,
+			name: cred.name,
+			type: credentialType,
+			data: {},
+		} as ICredentialsDecrypted);
+		credentialTestStatus.value[credentialId] = result.status === 'OK' ? 'success' : 'error';
+	} catch {
+		credentialTestStatus.value[credentialId] = 'error';
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Completion tracking
+// ---------------------------------------------------------------------------
+
+function isCardComplete(card: SetupCard): boolean {
+	// Credential check
+	if (card.credentialType) {
+		const selectedId = selections.value[card.credentialType];
+		if (!selectedId) return false;
+		// Credential must be tested successfully
+		if (credentialTestStatus.value[selectedId] !== 'success') return false;
+	}
+	// Parameter issues check
+	if (card.hasParamIssues) return false;
+	// Trigger check — only for the first trigger
+	if (card.isTrigger) {
+		const triggerNode = card.nodes.find((n) => n.isTrigger);
+		if (triggerNode && !triggerTestResults.value[triggerNode.node.name]) return false;
+	}
+	return true;
+}
+
+const allCredentialsSelected = computed(() =>
+	cards.value
+		.filter((c) => c.credentialType)
+		.every((c) => selections.value[c.credentialType!] !== null),
+);
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function getDisplayName(credentialType: string): string {
 	return credentialsStore.getCredentialTypeByName(credentialType)?.displayName ?? credentialType;
 }
 
-function getNodeDisplayName(node: InstanceAiWorkflowSetupNode): string {
-	if (node.credentialType) {
-		return getDisplayName(node.credentialType);
-	}
-	return node.node.name;
+function getCardTitle(card: SetupCard): string {
+	if (card.credentialType) return getDisplayName(card.credentialType);
+	if (card.nodes.length === 1) return card.nodes[0].node.name;
+	return 'Setup';
 }
+
+function getCardSubtitle(card: SetupCard): string | undefined {
+	if (card.nodes.length === 1) return card.nodes[0].node.name;
+	if (card.nodes.length > 1) {
+		return i18n.baseText('instanceAi.workflowSetup.usedByNodes', {
+			interpolate: { count: String(card.nodes.length) },
+		});
+	}
+	return undefined;
+}
+
+function getCredentialTestIcon(credentialId: string): IconName | undefined {
+	const status = credentialTestStatus.value[credentialId];
+	if (status === 'testing') return 'loader';
+	if (status === 'success') return 'check';
+	if (status === 'error') return 'triangle-alert';
+	return undefined;
+}
+
+function getCredentialTestClass(credentialId: string): string {
+	const status = credentialTestStatus.value[credentialId];
+	if (status === 'testing') return 'loading';
+	if (status === 'success') return 'success';
+	if (status === 'error') return 'error';
+	return '';
+}
+
+// ---------------------------------------------------------------------------
+// Event handlers
+// ---------------------------------------------------------------------------
 
 function handleCredentialSelected(credentialType: string, credentialId: string) {
 	selections.value[credentialType] = credentialId;
+	void testCredentialInBackground(credentialId, credentialType);
 }
 
 function handleCredentialDeselected(credentialType: string) {
@@ -149,23 +352,24 @@ function getTriggerTestStatusClass(
 	<div :class="$style.root">
 		<template v-if="!isSubmitted">
 			<div
-				v-if="currentRequest"
+				v-if="currentCard"
 				data-test-id="instance-ai-workflow-setup-card"
-				:class="[$style.card, { [$style.completed]: allCredentialsSelected }]"
+				:class="[$style.card, { [$style.completed]: isCardComplete(currentCard) }]"
 			>
 				<!-- Header -->
 				<header :class="$style.header">
 					<CredentialIcon
-						v-if="currentRequest.credentialType"
-						:credential-type-name="currentRequest.credentialType"
+						v-if="currentCard.credentialType"
+						:credential-type-name="currentCard.credentialType"
 						:size="16"
 					/>
 					<N8nIcon v-else icon="play" size="small" />
 					<N8nText :class="$style.title" size="medium" color="text-dark" bold>
-						{{ getNodeDisplayName(currentRequest) }}
+						{{ getCardTitle(currentCard) }}
 					</N8nText>
+					<!-- Completion check -->
 					<N8nText
-						v-if="currentCredentialSelected"
+						v-if="isCardComplete(currentCard)"
 						data-test-id="instance-ai-workflow-setup-step-check"
 						:class="$style.completeLabel"
 						size="medium"
@@ -173,35 +377,75 @@ function getTriggerTestStatusClass(
 					>
 						<N8nIcon icon="check" size="large" />
 					</N8nText>
+					<!-- Credential test status -->
+					<template
+						v-else-if="
+							currentCard.credentialType &&
+							selections[currentCard.credentialType] &&
+							getCredentialTestIcon(selections[currentCard.credentialType]!)
+						"
+					>
+						<N8nIcon
+							:icon="getCredentialTestIcon(selections[currentCard.credentialType]!)!"
+							size="small"
+							:class="$style[getCredentialTestClass(selections[currentCard.credentialType]!)]"
+						/>
+					</template>
 				</header>
 
 				<!-- Content -->
 				<div :class="$style.content">
-					<!-- Node name label -->
-					<N8nText :class="$style.nodeName" size="small" color="text-light">
-						{{ currentRequest.node.name }}
+					<!-- Subtitle: node name or "Used by X nodes" -->
+					<N8nText
+						v-if="getCardSubtitle(currentCard)"
+						:class="$style.nodeName"
+						size="small"
+						color="text-light"
+					>
+						{{ getCardSubtitle(currentCard) }}
 					</N8nText>
 
 					<!-- Credential picker -->
 					<CredentialPicker
-						v-if="currentRequest.credentialType"
-						:key="currentRequest.credentialType"
-						:app-name="getDisplayName(currentRequest.credentialType)"
-						:credential-type="currentRequest.credentialType"
-						:selected-credential-id="selections[currentRequest.credentialType]"
+						v-if="currentCard.credentialType"
+						:key="currentCard.credentialType"
+						:app-name="getDisplayName(currentCard.credentialType)"
+						:credential-type="currentCard.credentialType"
+						:selected-credential-id="selections[currentCard.credentialType]"
 						:project-id="props.projectId"
 						create-button-variant="outline"
-						@credential-selected="handleCredentialSelected(currentRequest.credentialType!, $event)"
-						@credential-deselected="handleCredentialDeselected(currentRequest.credentialType!)"
+						@credential-selected="handleCredentialSelected(currentCard.credentialType!, $event)"
+						@credential-deselected="handleCredentialDeselected(currentCard.credentialType!)"
 					/>
 
-					<!-- Parameter issues -->
-					<div v-if="currentRequest.parameterIssues" :class="$style.parameterIssues">
+					<!-- Node list for grouped cards -->
+					<div
+						v-if="!currentCard.hasParamIssues && currentCard.nodes.length > 1"
+						:class="$style.nodeList"
+					>
+						<N8nText size="small" color="text-light">
+							{{ i18n.baseText('instanceAi.workflowSetup.nodesUsing') }}
+						</N8nText>
+						<ul :class="$style.nodeListItems">
+							<li v-for="node in currentCard.nodes" :key="node.node.id">
+								{{ node.node.name }}
+							</li>
+						</ul>
+					</div>
+
+					<!-- Parameter issues (per-node cards only) -->
+					<div
+						v-if="currentCard.hasParamIssues && currentCard.nodes[0]?.parameterIssues"
+						:class="$style.parameterIssues"
+					>
 						<N8nText size="small" color="text-light">
 							{{ i18n.baseText('instanceAi.workflowSetup.parameterIssues') }}
 						</N8nText>
 						<ul :class="$style.issueList">
-							<li v-for="(issues, paramName) in currentRequest.parameterIssues" :key="paramName">
+							<li
+								v-for="(issues, paramName) in currentCard.nodes[0].parameterIssues"
+								:key="paramName"
+							>
 								<N8nText size="small" color="text-dark" bold>{{ paramName }}:</N8nText>
 								{{ issues.join(', ') }}
 							</li>
@@ -209,37 +453,45 @@ function getTriggerTestStatusClass(
 					</div>
 
 					<!-- Trigger test -->
-					<div v-if="currentRequest.isTrigger" :class="$style.triggerSection">
-						<div :class="$style.triggerRow">
+					<div v-if="currentCard.isTrigger" :class="$style.triggerSection">
+						<div
+							v-for="node in currentCard.nodes.filter((n) => n.isTrigger)"
+							:key="node.node.id"
+							:class="$style.triggerRow"
+						>
 							<N8nButton
 								size="small"
 								variant="outline"
 								:label="i18n.baseText('instanceAi.workflowSetup.testTrigger')"
-								:disabled="!currentCredentialSelected"
+								:disabled="
+									currentCard.credentialType
+										? selections[currentCard.credentialType] === null
+										: false
+								"
 								data-test-id="instance-ai-workflow-setup-test-trigger"
-								@click="handleTestTrigger(currentRequest.node.name)"
+								@click="handleTestTrigger(node.node.name)"
 							/>
-							<template v-if="currentRequest.triggerTestResult">
+							<template v-if="triggerTestResults[node.node.name]">
 								<N8nIcon
-									:icon="getTriggerTestStatusIcon(currentRequest.triggerTestResult)"
+									:icon="getTriggerTestStatusIcon(triggerTestResults[node.node.name])"
 									size="small"
-									:class="$style[getTriggerTestStatusClass(currentRequest.triggerTestResult)]"
+									:class="$style[getTriggerTestStatusClass(triggerTestResults[node.node.name])]"
 								/>
 								<N8nText
 									size="small"
 									:color="
-										currentRequest.triggerTestResult.status === 'success'
+										triggerTestResults[node.node.name]?.status === 'success'
 											? 'success'
-											: currentRequest.triggerTestResult.status === 'error'
+											: triggerTestResults[node.node.name]?.status === 'error'
 												? 'danger'
 												: 'text-light'
 									"
 								>
 									{{
-										currentRequest.triggerTestResult.status === 'success'
+										triggerTestResults[node.node.name]?.status === 'success'
 											? i18n.baseText('instanceAi.workflowSetup.triggerSuccess')
-											: currentRequest.triggerTestResult.status === 'error'
-												? (currentRequest.triggerTestResult.error ??
+											: triggerTestResults[node.node.name]?.status === 'error'
+												? (triggerTestResults[node.node.name]?.error ??
 													i18n.baseText('instanceAi.workflowSetup.triggerError'))
 												: i18n.baseText('instanceAi.workflowSetup.triggerListening')
 									}}
@@ -341,6 +593,19 @@ function getTriggerTestStatusClass(
 .nodeName {
 	color: var(--color--text--tint-2);
 	font-size: var(--font-size--2xs);
+}
+
+.nodeList {
+	display: flex;
+	flex-direction: column;
+	gap: var(--spacing--4xs);
+}
+
+.nodeListItems {
+	margin: 0;
+	padding-left: var(--spacing--sm);
+	font-size: var(--font-size--2xs);
+	color: var(--color--text--tint-1);
 }
 
 .parameterIssues {

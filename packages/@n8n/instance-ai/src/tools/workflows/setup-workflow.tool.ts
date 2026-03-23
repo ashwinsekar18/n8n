@@ -54,6 +54,23 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 					}),
 				)
 				.optional(),
+			updatedNodes: z
+				.array(
+					z.object({
+						id: z.string(),
+						name: z.string().optional(),
+						type: z.string(),
+						typeVersion: z.number(),
+						position: z.tuple([z.number(), z.number()]),
+						parameters: z.record(z.unknown()).optional(),
+						credentials: z
+							.record(z.object({ id: z.string().optional(), name: z.string() }))
+							.optional(),
+						disabled: z.boolean().optional(),
+					}),
+				)
+				.optional(),
+			updatedConnections: z.record(z.unknown()).optional(),
 		}),
 		suspendSchema: setupSuspendSchema,
 		resumeSchema: setupResumeSchema,
@@ -158,6 +175,20 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 				await applyNodeParameters(context, input.workflowId, resumeData.nodeParameters);
 			}
 
+			// Fetch updated workflow to include in response so the frontend can refresh the canvas
+			const updatedWorkflow = await context.workflowService.getAsWorkflowJSON(input.workflowId);
+			const updatedNodes = updatedWorkflow.nodes.map((node) => ({
+				id: node.id,
+				name: node.name,
+				type: node.type,
+				typeVersion: node.typeVersion,
+				position: node.position,
+				parameters: node.parameters as Record<string, unknown> | undefined,
+				credentials: node.credentials,
+				disabled: node.disabled,
+			}));
+			const updatedConnections = updatedWorkflow.connections as Record<string, unknown>;
+
 			if (resumeData.action === 'partial-apply') {
 				const remainingRequests = await analyzeWorkflow(context, input.workflowId);
 				const completedNodes = buildCompletedReport(
@@ -172,10 +203,12 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 					reason: `Applied setup for ${String(completedNodes.length)} node(s), ${String(skippedNodes.length)} node(s) still need configuration.`,
 					completedNodes,
 					skippedNodes,
+					updatedNodes,
+					updatedConnections,
 				};
 			}
 
-			return { success: true };
+			return { success: true, updatedNodes, updatedConnections };
 		},
 	});
 }

@@ -6,6 +6,8 @@ import type { InstanceAiWorkflowSetupNode, InstanceAiCredentialFlow } from '@n8n
 import type { INodeUi, INodeUpdatePropertiesInformation } from '@/Interface';
 import { useInstanceAiStore } from '../instanceAi.store';
 import { useCredentialsStore } from '@/features/credentials/credentials.store';
+import { useWorkflowsStore } from '@/app/stores/workflows.store';
+import { useNodeHelpers } from '@/app/composables/useNodeHelpers';
 import CredentialIcon from '@/features/credentials/components/CredentialIcon.vue';
 import NodeCredentials from '@/features/credentials/components/NodeCredentials.vue';
 import { useWizardNavigation } from '@/features/ai/shared/composables/useWizardNavigation';
@@ -42,6 +44,8 @@ const props = defineProps<{
 const i18n = useI18n();
 const store = useInstanceAiStore();
 const credentialsStore = useCredentialsStore();
+const workflowsStore = useWorkflowsStore();
+const nodeHelpers = useNodeHelpers();
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -585,6 +589,56 @@ function handleTestTrigger(nodeName: string) {
 	);
 }
 
+/**
+ * Optimistically update canvas nodes with the applied credentials and parameters.
+ * This ensures the canvas reflects the changes immediately, without waiting
+ * for the backend round-trip via the SSE tool-result event.
+ */
+function applyToCanvas(
+	nodeCredentials: Record<string, Record<string, string>>,
+	nodeParameters?: Record<string, Record<string, unknown>>,
+) {
+	const affectedNodeNames = new Set<string>();
+
+	// Apply credentials to canvas nodes
+	for (const [nodeName, credMap] of Object.entries(nodeCredentials)) {
+		const node = workflowsStore.getNodeByName(nodeName);
+		if (!node) continue;
+		affectedNodeNames.add(nodeName);
+
+		const updatedCredentials = { ...node.credentials };
+		for (const [credType, credId] of Object.entries(credMap)) {
+			const credential = credentialsStore.getCredentialById(credId);
+			if (credential) {
+				updatedCredentials[credType] = { id: credential.id, name: credential.name };
+			}
+		}
+		node.credentials = updatedCredentials;
+	}
+
+	// Apply parameters to canvas nodes
+	if (nodeParameters) {
+		for (const [nodeName, params] of Object.entries(nodeParameters)) {
+			const node = workflowsStore.getNodeByName(nodeName);
+			if (!node) continue;
+			affectedNodeNames.add(nodeName);
+
+			// params values are user-entered primitives (string | number | boolean)
+			// which are a subset of NodeParameterValueType
+			node.parameters = {
+				...node.parameters,
+				...params,
+			} as INodeUi['parameters'];
+		}
+	}
+
+	// Refresh issue indicators for all affected nodes
+	for (const nodeName of affectedNodeNames) {
+		nodeHelpers.updateNodeParameterIssuesByName(nodeName);
+		nodeHelpers.updateNodeCredentialIssuesByName(nodeName);
+	}
+}
+
 function handleApply() {
 	const nodeCredentials = buildNodeCredentials();
 	const nodeParameters = buildNodeParameters();
@@ -593,6 +647,10 @@ function handleApply() {
 
 	isSubmitted.value = true;
 	isPartial.value = partial;
+
+	// Update canvas immediately so nodes reflect the applied state
+	applyToCanvas(nodeCredentials, nodeParameters);
+
 	store.resolveConfirmation(props.requestId, 'approved');
 	void store.confirmAction(
 		props.requestId,

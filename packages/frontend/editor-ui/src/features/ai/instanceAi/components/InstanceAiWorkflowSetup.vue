@@ -3,7 +3,6 @@ import { ref, computed, watch } from 'vue';
 import { N8nButton, N8nIcon, N8nText, N8nTooltip } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
 import type { InstanceAiWorkflowSetupNode, InstanceAiCredentialFlow } from '@n8n/api-types';
-import type { ICredentialsDecrypted } from 'n8n-workflow';
 import type { INodeUi, INodeUpdatePropertiesInformation } from '@/Interface';
 import { useInstanceAiStore } from '../instanceAi.store';
 import { useCredentialsStore } from '@/features/credentials/credentials.store';
@@ -108,7 +107,6 @@ const showArrows = computed(() => totalSteps.value > 1);
 const isSubmitted = ref(false);
 const isDeferred = ref(false);
 const selections = ref<Record<string, string | null>>({});
-const credentialTestStatus = ref<Record<string, 'testing' | 'success' | 'error'>>({});
 const paramValues = ref<Record<string, Record<string, unknown>>>({});
 
 const triggerTestResults = computed(() => {
@@ -146,39 +144,15 @@ function initSelections() {
 		const existingOnNode = req.node.credentials?.[req.credentialType];
 		if (existingOnNode?.id) {
 			selections.value[req.credentialType] = existingOnNode.id;
-			void testCredentialInBackground(existingOnNode.id, req.credentialType);
 			// 2. Auto-select if exactly one credential available
 		} else if (req.existingCredentials?.length === 1) {
 			selections.value[req.credentialType] = req.existingCredentials[0].id;
-			void testCredentialInBackground(req.existingCredentials[0].id, req.credentialType);
 		} else {
 			selections.value[req.credentialType] = null;
 		}
 	}
 }
 initSelections();
-
-// ---------------------------------------------------------------------------
-// Credential testing
-// ---------------------------------------------------------------------------
-
-async function testCredentialInBackground(credentialId: string, credentialType: string) {
-	const cred = credentialsStore.getCredentialById(credentialId);
-	if (!cred) return;
-
-	credentialTestStatus.value[credentialId] = 'testing';
-	try {
-		const result = await credentialsStore.testCredential({
-			id: cred.id,
-			name: cred.name,
-			type: credentialType,
-			data: {},
-		} as ICredentialsDecrypted);
-		credentialTestStatus.value[credentialId] = result.status === 'OK' ? 'success' : 'error';
-	} catch {
-		credentialTestStatus.value[credentialId] = 'error';
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Completion
@@ -188,7 +162,6 @@ function isCardComplete(card: SetupCard): boolean {
 	if (card.credentialType) {
 		const selectedId = selections.value[card.credentialType];
 		if (!selectedId) return false;
-		if (credentialTestStatus.value[selectedId] !== 'success') return false;
 	}
 	if (card.hasParamIssues) return false;
 	if (card.isTrigger) {
@@ -197,13 +170,6 @@ function isCardComplete(card: SetupCard): boolean {
 	}
 	return true;
 }
-
-const isTestingCredential = computed(() => {
-	const card = currentCard.value;
-	if (!card?.credentialType) return false;
-	const selectedId = selections.value[card.credentialType];
-	return !!selectedId && credentialTestStatus.value[selectedId] === 'testing';
-});
 
 const allCredentialsSelected = computed(() =>
 	cards.value
@@ -270,7 +236,6 @@ function onCredentialSelected(card: SetupCard, updateInfo: INodeUpdateProperties
 
 	if (credentialId) {
 		selections.value[card.credentialType] = credentialId;
-		void testCredentialInBackground(credentialId, card.credentialType);
 	} else {
 		selections.value[card.credentialType] = null;
 	}
@@ -460,10 +425,7 @@ function handleLater() {
 							:class="$style.actionButton"
 							:label="i18n.baseText('instanceAi.workflowSetup.testTrigger')"
 							:disabled="
-								isTestingCredential ||
-								(currentCard.credentialType
-									? selections[currentCard.credentialType] === null
-									: false)
+								currentCard.credentialType ? selections[currentCard.credentialType] === null : false
 							"
 							data-test-id="instance-ai-workflow-setup-test-trigger"
 							@click="handleTestTrigger(currentCard.nodes.find((n) => n.isTrigger)!.node.name)"
@@ -472,7 +434,7 @@ function handleLater() {
 						<N8nButton
 							size="small"
 							:class="$style.actionButton"
-							:disabled="!allCredentialsSelected || isTestingCredential"
+							:disabled="!allCredentialsSelected"
 							:label="i18n.baseText('instanceAi.workflowSetup.apply')"
 							data-test-id="instance-ai-workflow-setup-apply-button"
 							@click="handleApply"

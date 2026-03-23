@@ -1,10 +1,10 @@
 import { createTool } from '@mastra/core/tools';
 import { instanceAiConfirmationSeveritySchema } from '@n8n/api-types';
-import type { IDataObject } from '@n8n/workflow-sdk';
+import type { IDataObject, NodeJSON } from '@n8n/workflow-sdk';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
 
-import type { InstanceAiContext, WorkflowNode } from '../../types';
+import type { InstanceAiContext } from '../../types';
 
 const setupNodeSchema = z.object({
 	node: z.object({
@@ -30,13 +30,31 @@ const setupNodeSchema = z.object({
 
 type SetupRequest = z.infer<typeof setupNodeSchema>;
 
+/**
+ * Build a setup request from a WorkflowJSON node.
+ * Uses the node's own credential types (from its credentials field) rather than
+ * fetching the node type description, which avoids typeVersion mismatch issues.
+ */
 async function buildSetupRequest(
 	context: InstanceAiContext,
-	node: WorkflowNode,
+	node: NodeJSON,
 	triggerTestResult?: { status: 'success' | 'error'; error?: string },
-): Promise<SetupRequest> {
-	const nodeDesc = await context.nodeService.getDescription(node.type).catch(() => undefined);
-	const credentialType = nodeDesc?.credentials?.[0]?.name;
+): Promise<SetupRequest | null> {
+	if (!node.name) return null;
+
+	// Use credentials already on the node (from WorkflowJSON) to determine type.
+	// This is more reliable than getDescription() which may return the wrong version.
+	const nodeCredTypes = node.credentials ? Object.keys(node.credentials) : [];
+
+	// Fall back to node description if the node has no credentials assigned yet
+	let credentialType: string | undefined;
+	if (nodeCredTypes.length > 0) {
+		credentialType = nodeCredTypes[0];
+	} else {
+		const nodeDesc = await context.nodeService.getDescription(node.type).catch(() => undefined);
+		credentialType = nodeDesc?.credentials?.[0]?.name;
+	}
+
 	const isTrigger = node.type.toLowerCase().includes('trigger');
 
 	let existingCredentials: Array<{ id: string; name: string }> = [];
@@ -45,15 +63,23 @@ async function buildSetupRequest(
 		existingCredentials = creds.map((c) => ({ id: c.id, name: c.name }));
 	}
 
-	const nodeRecord = node as unknown as Record<string, unknown>;
 	return {
 		node: {
 			name: node.name,
 			type: node.type,
-			typeVersion: typeof nodeRecord.typeVersion === 'number' ? nodeRecord.typeVersion : 1,
-			parameters: node.parameters ?? {},
-			position: node.position as [number, number],
-			id: typeof nodeRecord.id === 'string' ? nodeRecord.id : nanoid(),
+			typeVersion: node.typeVersion ?? 1,
+			parameters: (node.parameters as Record<string, unknown>) ?? {},
+			position: node.position ?? [0, 0],
+			id: node.id ?? nanoid(),
+			...(node.credentials
+				? {
+						credentials: Object.fromEntries(
+							Object.entries(node.credentials)
+								.filter(([, v]) => v.id !== undefined)
+								.map(([k, v]) => [k, { id: v.id!, name: v.name }]),
+						),
+					}
+				: {}),
 		},
 		...(credentialType ? { credentialType } : {}),
 		...(existingCredentials.length > 0 ? { existingCredentials } : {}),
@@ -62,7 +88,32 @@ async function buildSetupRequest(
 	};
 }
 
+/**
+ * Build a map of which credential types each node needs.
+ * Used during Apply to assign credentials only to matching nodes.
+ */
+function buildNodeCredentialMap(setupRequests: SetupRequest[]): Map<string, Set<string>> {
+	const map = new Map<string, Set<string>>();
+	for (const req of setupRequests) {
+		if (!req.credentialType) continue;
+		let nodeNames = map.get(req.credentialType);
+		if (!nodeNames) {
+			nodeNames = new Set();
+			map.set(req.credentialType, nodeNames);
+		}
+		for (const node of [req]) {
+			nodeNames.add(node.node.name);
+		}
+	}
+	return map;
+}
+
 export function createSetupWorkflowTool(context: InstanceAiContext) {
+	// Stable requestId across re-suspends so the frontend component persists
+	let currentRequestId: string | null = null;
+	// Keep the last setup requests to know which nodes need which credentials
+	let lastSetupRequests: SetupRequest[] = [];
+
 	return createTool({
 		id: 'setup-workflow',
 		description:
@@ -100,30 +151,35 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 
 			// State 1: First call — fetch workflow, analyze nodes, build setup requests, suspend
 			if (resumeData === undefined || resumeData === null) {
-				const workflow = await context.workflowService.get(input.workflowId);
+				// Use getAsWorkflowJSON for full node data (typeVersion, credentials, id)
+				const workflowJson = await context.workflowService.getAsWorkflowJSON(input.workflowId);
 
-				const setupRequests = await Promise.all(
-					workflow.nodes.map(async (node) => await buildSetupRequest(context, node)),
+				const allRequests = await Promise.all(
+					workflowJson.nodes.map(async (node) => await buildSetupRequest(context, node)),
 				);
 
-				// Only include nodes that need setup (have credentials or are triggers)
-				const filteredRequests = setupRequests.filter(
-					(req) => req.credentialType !== undefined || req.isTrigger,
+				const setupRequests = allRequests.filter(
+					(req): req is SetupRequest =>
+						req !== null && (req.credentialType !== undefined || req.isTrigger),
 				);
 
-				if (filteredRequests.length === 0) {
+				if (setupRequests.length === 0) {
 					return { success: true, reason: 'No nodes require setup.' };
 				}
 
+				// Store for later use during Apply
+				lastSetupRequests = setupRequests;
+				// Generate stable requestId for this tool invocation
+				currentRequestId = nanoid();
+
 				await suspend?.({
-					requestId: nanoid(),
+					requestId: currentRequestId,
 					message: 'Configure credentials and parameters for your workflow',
 					severity: 'info' as const,
-					setupRequests: filteredRequests,
+					setupRequests,
 					workflowId: input.workflowId,
 					...(input.projectId ? { projectId: input.projectId } : {}),
 				});
-				// suspend() never resolves
 				return { success: false };
 			}
 
@@ -138,11 +194,17 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 
 			// State 3: Test trigger — apply creds/params, run trigger, re-suspend with result
 			if (resumeData.action === 'test-trigger' && resumeData.testTriggerNode) {
-				// Apply credentials to workflow if provided
+				// Apply credentials to matching nodes only
 				if (resumeData.credentials) {
 					const workflowJson = await context.workflowService.getAsWorkflowJSON(input.workflowId);
+					const nodeCredMap = buildNodeCredentialMap(lastSetupRequests);
+
 					for (const node of workflowJson.nodes) {
+						if (!node.name) continue;
 						for (const [credType, credId] of Object.entries(resumeData.credentials)) {
+							const nodesForType = nodeCredMap.get(credType);
+							if (!nodesForType?.has(node.name)) continue;
+
 							const cred = await context.credentialService.get(credId);
 							if (cred) {
 								node.credentials = {
@@ -172,10 +234,10 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 					};
 				}
 
-				// Re-fetch workflow and rebuild setup requests with trigger result
-				const updatedWorkflow = await context.workflowService.get(input.workflowId);
-				const refreshedRequests = await Promise.all(
-					updatedWorkflow.nodes.map(
+				// Re-fetch and rebuild with trigger result
+				const updatedJson = await context.workflowService.getAsWorkflowJSON(input.workflowId);
+				const allRefreshed = await Promise.all(
+					updatedJson.nodes.map(
 						async (node) =>
 							await buildSetupRequest(
 								context,
@@ -185,29 +247,38 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 					),
 				);
 
-				const filteredRefreshed = refreshedRequests.filter(
-					(req) => req.credentialType !== undefined || req.isTrigger,
+				const refreshedRequests = allRefreshed.filter(
+					(req): req is SetupRequest =>
+						req !== null && (req.credentialType !== undefined || req.isTrigger),
 				);
 
-				// Re-suspend with updated data
+				lastSetupRequests = refreshedRequests;
+
+				// Re-suspend with SAME requestId so frontend component persists
 				await suspend?.({
-					requestId: nanoid(),
+					requestId: currentRequestId ?? nanoid(),
 					message: 'Configure credentials and parameters for your workflow',
 					severity: 'info' as const,
-					setupRequests: filteredRefreshed,
+					setupRequests: refreshedRequests,
 					workflowId: input.workflowId,
 					...(input.projectId ? { projectId: input.projectId } : {}),
 				});
 				return { success: false };
 			}
 
-			// State 4: Apply — save credentials and parameters to workflow
+			// State 4: Apply — save credentials and parameters to matching nodes only
 			if (resumeData.credentials || resumeData.nodeParameters) {
 				const workflowJson = await context.workflowService.getAsWorkflowJSON(input.workflowId);
 
 				if (resumeData.credentials) {
+					const nodeCredMap = buildNodeCredentialMap(lastSetupRequests);
+
 					for (const node of workflowJson.nodes) {
+						if (!node.name) continue;
 						for (const [credType, credId] of Object.entries(resumeData.credentials)) {
+							const nodesForType = nodeCredMap.get(credType);
+							if (!nodesForType?.has(node.name)) continue;
+
 							const cred = await context.credentialService.get(credId);
 							if (cred) {
 								node.credentials = {

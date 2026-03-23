@@ -1,5 +1,9 @@
-import { credentialRequestSchema } from '@n8n/api-types';
-import type { InstanceAiCredentialRequest, InstanceAiEvent } from '@n8n/api-types';
+import { credentialRequestSchema, workflowSetupNodeSchema } from '@n8n/api-types';
+import type {
+	InstanceAiCredentialRequest,
+	InstanceAiEvent,
+	InstanceAiWorkflowSetupNode,
+} from '@n8n/api-types';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -191,6 +195,33 @@ export function mapMastraChunkToEvent(
 				? { url: rawDomainAccess.url, host: rawDomainAccess.host }
 				: undefined;
 
+		// Extract optional credentialFlow for credential setup stage
+		const rawCredentialFlow = isRecord(suspendPayload.credentialFlow)
+			? suspendPayload.credentialFlow
+			: undefined;
+		const credentialFlow =
+			rawCredentialFlow &&
+			typeof rawCredentialFlow.stage === 'string' &&
+			(rawCredentialFlow.stage === 'generic' || rawCredentialFlow.stage === 'finalize')
+				? { stage: rawCredentialFlow.stage }
+				: undefined;
+
+		// Extract and validate optional setupRequests for workflow setup HITL
+		let setupRequests: InstanceAiWorkflowSetupNode[] | undefined;
+		if (Array.isArray(suspendPayload.setupRequests)) {
+			const parsed = suspendPayload.setupRequests
+				.map((item) => workflowSetupNodeSchema.safeParse(item))
+				.filter((r) => r.success)
+				.map((r) => r.data);
+			if (parsed.length > 0) {
+				setupRequests = parsed;
+			}
+		}
+
+		// Extract optional workflowId for workflow setup tool
+		const workflowId =
+			typeof suspendPayload.workflowId === 'string' ? suspendPayload.workflowId : undefined;
+
 		return {
 			type: 'confirmation-request',
 			runId,
@@ -209,6 +240,9 @@ export function mapMastraChunkToEvent(
 				...(projectId ? { projectId } : {}),
 				...(inputType ? { inputType } : {}),
 				...(domainAccess ? { domainAccess } : {}),
+				...(credentialFlow ? { credentialFlow } : {}),
+				...(setupRequests ? { setupRequests } : {}),
+				...(workflowId ? { workflowId } : {}),
 			},
 		};
 	}

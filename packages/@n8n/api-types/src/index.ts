@@ -256,6 +256,7 @@ export {
 	toolErrorPayloadSchema,
 	confirmationRequestPayloadSchema,
 	credentialRequestSchema,
+	workflowSetupNodeSchema,
 	errorPayloadSchema,
 	filesystemRequestPayloadSchema,
 	instanceAiFilesystemResponseSchema,

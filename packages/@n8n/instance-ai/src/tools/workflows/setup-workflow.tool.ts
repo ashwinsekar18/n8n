@@ -12,6 +12,8 @@ import {
 	analyzeWorkflow,
 	applyNodeCredentials,
 	applyNodeParameters,
+	buildCompletedReport,
+	buildSkippedReport,
 } from './setup-workflow.service';
 import type { InstanceAiContext } from '../../types';
 
@@ -33,7 +35,25 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 		outputSchema: z.object({
 			success: z.boolean(),
 			deferred: z.boolean().optional(),
+			partial: z.boolean().optional(),
 			reason: z.string().optional(),
+			completedNodes: z
+				.array(
+					z.object({
+						nodeName: z.string(),
+						credentialType: z.string().optional(),
+						parametersSet: z.array(z.string()).optional(),
+					}),
+				)
+				.optional(),
+			skippedNodes: z
+				.array(
+					z.object({
+						nodeName: z.string(),
+						credentialType: z.string().optional(),
+					}),
+				)
+				.optional(),
 		}),
 		suspendSchema: setupSuspendSchema,
 		resumeSchema: setupResumeSchema,
@@ -129,13 +149,30 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 				return { success: false };
 			}
 
-			// State 4: Apply — save credentials and parameters
+			// State 4: Apply (full or partial) — save credentials and parameters
 			preTestSnapshot = null;
 			if (resumeData.credentials) {
 				await applyNodeCredentials(context, input.workflowId, resumeData.credentials);
 			}
 			if (resumeData.nodeParameters) {
 				await applyNodeParameters(context, input.workflowId, resumeData.nodeParameters);
+			}
+
+			if (resumeData.action === 'partial-apply') {
+				const remainingRequests = await analyzeWorkflow(context, input.workflowId);
+				const completedNodes = buildCompletedReport(
+					resumeData.credentials,
+					resumeData.nodeParameters,
+				);
+				const skippedNodes = buildSkippedReport(remainingRequests, resumeData.skippedNodeNames);
+
+				return {
+					success: true,
+					partial: true,
+					reason: `Applied setup for ${String(completedNodes.length)} node(s), ${String(skippedNodes.length)} node(s) still need configuration.`,
+					completedNodes,
+					skippedNodes,
+				};
 			}
 
 			return { success: true };

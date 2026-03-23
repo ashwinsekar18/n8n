@@ -163,6 +163,7 @@ const showArrows = computed(() => totalSteps.value > 1);
 
 const isSubmitted = ref(false);
 const isDeferred = ref(false);
+const isPartial = ref(false);
 const selections = ref<Record<string, string | null>>({});
 const paramValues = ref<Record<string, Record<string, unknown>>>({});
 const credTestOverrides = ref<Record<string, { success: boolean; message?: string } | null>>({});
@@ -380,6 +381,8 @@ function isCardComplete(card: SetupCard): boolean {
 }
 
 const allCardsComplete = computed(() => cards.value.every((c) => isCardComplete(c)));
+const anyCardComplete = computed(() => cards.value.some((c) => isCardComplete(c)));
+const isPartialApply = computed(() => anyCardComplete.value && !allCardsComplete.value);
 
 // ---------------------------------------------------------------------------
 // Auto-advance: only when a card transitions from incomplete -> complete
@@ -495,6 +498,10 @@ function buildNodeCredentials(): Record<string, Record<string, string>> {
 		const selectedId = selections.value[card.id];
 		if (!selectedId) continue;
 
+		// Skip cards where the credential test explicitly failed
+		const testResult = getEffectiveCredTestResult(card);
+		if (testResult !== undefined && testResult !== null && !testResult.success) continue;
+
 		for (const req of card.nodes) {
 			if (!result[req.node.name]) {
 				result[req.node.name] = {};
@@ -503,6 +510,20 @@ function buildNodeCredentials(): Record<string, Record<string, string>> {
 		}
 	}
 	return result;
+}
+
+/** Collect node names from incomplete cards for partial-apply reporting. */
+function buildSkippedNodeNames(): string[] {
+	const names: string[] = [];
+	for (const card of cards.value) {
+		if (isCardComplete(card)) continue;
+		for (const req of card.nodes) {
+			if (!names.includes(req.node.name)) {
+				names.push(req.node.name);
+			}
+		}
+	}
+	return names;
 }
 
 /** Build nodeParameters from paramValues (only include entries with values). */
@@ -567,8 +588,11 @@ function handleTestTrigger(nodeName: string) {
 function handleApply() {
 	const nodeCredentials = buildNodeCredentials();
 	const nodeParameters = buildNodeParameters();
+	const partial = isPartialApply.value;
+	const skippedNodeNames = partial ? buildSkippedNodeNames() : undefined;
 
 	isSubmitted.value = true;
+	isPartial.value = partial;
 	store.resolveConfirmation(props.requestId, 'approved');
 	void store.confirmAction(
 		props.requestId,
@@ -579,9 +603,10 @@ function handleApply() {
 		undefined,
 		undefined,
 		{
-			action: 'apply',
+			action: partial ? 'partial-apply' : 'apply',
 			nodeCredentials,
 			nodeParameters,
+			skippedNodeNames,
 		},
 	);
 }
@@ -845,8 +870,12 @@ function handleLater() {
 						<N8nButton
 							size="small"
 							:class="$style.actionButton"
-							:disabled="!allCardsComplete"
-							:label="i18n.baseText('instanceAi.workflowSetup.apply')"
+							:disabled="!anyCardComplete"
+							:label="
+								isPartialApply
+									? i18n.baseText('instanceAi.workflowSetup.applyCompleted')
+									: i18n.baseText('instanceAi.workflowSetup.apply')
+							"
 							data-test-id="instance-ai-workflow-setup-apply-button"
 							@click="handleApply"
 						/>
@@ -859,6 +888,10 @@ function handleLater() {
 			<template v-if="isDeferred">
 				<N8nIcon icon="arrow-right" size="small" :class="$style.skippedIcon" />
 				<span>{{ i18n.baseText('instanceAi.workflowSetup.deferred') }}</span>
+			</template>
+			<template v-else-if="isPartial">
+				<N8nIcon icon="check" size="small" :class="$style.partialIcon" />
+				<span>{{ i18n.baseText('instanceAi.workflowSetup.partiallyApplied') }}</span>
 			</template>
 			<template v-else>
 				<N8nIcon icon="check" size="small" :class="$style.successIcon" />
@@ -1031,6 +1064,10 @@ function handleLater() {
 
 .successIcon {
 	color: var(--color--success);
+}
+
+.partialIcon {
+	color: var(--color--warning);
 }
 
 .skippedIcon {

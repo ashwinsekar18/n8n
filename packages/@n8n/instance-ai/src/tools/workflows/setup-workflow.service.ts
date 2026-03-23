@@ -337,6 +337,77 @@ export async function applyNodeParameters(
 	await context.workflowService.updateFromWorkflowJSON(workflowId, workflowJson);
 }
 
+// ── Partial-apply reporting ──────────────────────────────────────────────────
+
+/** Build a report of nodes that received credentials or parameters. */
+export function buildCompletedReport(
+	appliedCredentials?: Record<string, Record<string, string>>,
+	appliedParameters?: Record<string, Record<string, unknown>>,
+): Array<{ nodeName: string; credentialType?: string; parametersSet?: string[] }> {
+	const byNode = new Map<string, { credentialTypes: string[]; parameterNames: string[] }>();
+
+	if (appliedCredentials) {
+		for (const [nodeName, credMap] of Object.entries(appliedCredentials)) {
+			for (const credType of Object.keys(credMap)) {
+				let entry = byNode.get(nodeName);
+				if (!entry) {
+					entry = { credentialTypes: [], parameterNames: [] };
+					byNode.set(nodeName, entry);
+				}
+				entry.credentialTypes.push(credType);
+			}
+		}
+	}
+
+	if (appliedParameters) {
+		for (const [nodeName, params] of Object.entries(appliedParameters)) {
+			let entry = byNode.get(nodeName);
+			if (!entry) {
+				entry = { credentialTypes: [], parameterNames: [] };
+				byNode.set(nodeName, entry);
+			}
+			entry.parameterNames.push(...Object.keys(params));
+		}
+	}
+
+	const result: Array<{ nodeName: string; credentialType?: string; parametersSet?: string[] }> = [];
+	for (const [nodeName, entry] of byNode) {
+		if (entry.credentialTypes.length > 0) {
+			for (const credType of entry.credentialTypes) {
+				result.push({
+					nodeName,
+					credentialType: credType,
+					...(entry.parameterNames.length > 0 ? { parametersSet: entry.parameterNames } : {}),
+				});
+			}
+		} else if (entry.parameterNames.length > 0) {
+			result.push({ nodeName, parametersSet: entry.parameterNames });
+		}
+	}
+	return result;
+}
+
+/** Build a report of nodes that were skipped during partial apply. */
+export function buildSkippedReport(
+	setupRequests: SetupRequest[],
+	skippedNodeNames?: string[],
+): Array<{ nodeName: string; credentialType?: string }> {
+	if (!skippedNodeNames || skippedNodeNames.length === 0) return [];
+
+	const skippedSet = new Set(skippedNodeNames);
+	const result: Array<{ nodeName: string; credentialType?: string }> = [];
+
+	for (const req of setupRequests) {
+		if (!skippedSet.has(req.node.name)) continue;
+		result.push({
+			nodeName: req.node.name,
+			...(req.credentialType ? { credentialType: req.credentialType } : {}),
+		});
+	}
+
+	return result;
+}
+
 // ── Full workflow analysis ──────────────────────────────────────────────────
 
 /**

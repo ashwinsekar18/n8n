@@ -47,38 +47,58 @@ const credentialsStore = useCredentialsStore();
 // ---------------------------------------------------------------------------
 
 const HTTP_REQUEST_NODE_TYPE = 'n8n-nodes-base.httpRequest';
-const HTTP_REQUEST_TOOL_NODE_TYPE = '@n8n/n8n-nodes-langchain.toolHttpRequest';
+const HTTP_REQUEST_TOOL_NODE_TYPE = 'n8n-nodes-base.httpRequestTool';
 
 // ---------------------------------------------------------------------------
-// Card grouping (with HTTP Request URL grouping)
+// Card grouping — preserves backend position order, merges same-credential nodes
 // ---------------------------------------------------------------------------
+
+function credGroupKey(req: InstanceAiWorkflowSetupNode): string {
+	const credType = req.credentialType!;
+	const isHttpRequest =
+		req.node.type === HTTP_REQUEST_NODE_TYPE || req.node.type === HTTP_REQUEST_TOOL_NODE_TYPE;
+	if (isHttpRequest) {
+		return `${credType}:http:${String(req.node.parameters.url ?? '')}`;
+	}
+	return credType;
+}
 
 const cards = computed((): SetupCard[] => {
-	const result: SetupCard[] = [];
-	const credGroups = new Map<string, InstanceAiWorkflowSetupNode[]>();
+	// Process requests in backend order. Group credential requests that share
+	// the same key; keep a stable insertion-order map so the first occurrence
+	// determines position in the final list.
+	const ordered: SetupCard[] = [];
+	const credCardByKey = new Map<string, SetupCard>();
 
 	for (const req of props.setupRequests) {
 		if (req.credentialType) {
-			// Group HTTP Request nodes by credentialType + URL
-			const isHttpRequest =
-				req.node.type === HTTP_REQUEST_NODE_TYPE || req.node.type === HTTP_REQUEST_TOOL_NODE_TYPE;
-
-			let mapKey: string;
-			if (isHttpRequest) {
-				const url = String(req.node.parameters.url ?? '');
-				mapKey = `${req.credentialType}:http:${url}`;
-			} else {
-				mapKey = req.credentialType;
-			}
-
-			const existing = credGroups.get(mapKey);
+			const key = credGroupKey(req);
+			const existing = credCardByKey.get(key);
 			if (existing) {
-				existing.push(req);
+				existing.nodes.push(req);
+				if (req.isTrigger) existing.isTrigger = true;
+				if (req.isFirstTrigger) existing.isFirstTrigger = true;
+				if (req.isTestable) existing.isTestable = true;
+				if (req.isAutoApplied) existing.isAutoApplied = true;
+				if (req.credentialTestResult && !existing.credentialTestResult) {
+					existing.credentialTestResult = req.credentialTestResult;
+				}
 			} else {
-				credGroups.set(mapKey, [req]);
+				const card: SetupCard = {
+					id: `cred-${key}`,
+					credentialType: req.credentialType,
+					nodes: [req],
+					isTrigger: req.isTrigger,
+					isFirstTrigger: req.isFirstTrigger ?? false,
+					isTestable: req.isTestable ?? false,
+					credentialTestResult: req.credentialTestResult,
+					isAutoApplied: req.isAutoApplied ?? false,
+				};
+				credCardByKey.set(key, card);
+				ordered.push(card);
 			}
 		} else if (req.isTrigger) {
-			result.push({
+			ordered.push({
 				id: `trigger-${req.node.id}`,
 				nodes: [req],
 				isTrigger: true,
@@ -89,26 +109,7 @@ const cards = computed((): SetupCard[] => {
 		}
 	}
 
-	for (const [mapKey, nodes] of credGroups) {
-		const firstNode = nodes[0];
-		const credType = firstNode.credentialType!;
-		const testResult = nodes.find((n) => n.credentialTestResult)?.credentialTestResult;
-		const autoApplied = nodes.some((n) => n.isAutoApplied);
-		const hasFirstTrigger = nodes.some((n) => n.isFirstTrigger);
-
-		result.push({
-			id: `cred-${mapKey}`,
-			credentialType: credType,
-			nodes,
-			isTrigger: nodes.some((n) => n.isTrigger),
-			isFirstTrigger: hasFirstTrigger,
-			isTestable: nodes.some((n) => n.isTestable),
-			credentialTestResult: testResult,
-			isAutoApplied: autoApplied,
-		});
-	}
-
-	return result;
+	return ordered;
 });
 
 // ---------------------------------------------------------------------------

@@ -215,6 +215,8 @@ export interface InstanceAiCredentialService {
 	get(credentialId: string): Promise<CredentialDetail>;
 	delete(credentialId: string): Promise<void>;
 	test(credentialId: string): Promise<{ success: boolean; message?: string }>;
+	/** Whether a credential type has a test function. When false, skip testing. */
+	isTestable?(credentialType: string): Promise<boolean>;
 	getDocumentationUrl?(credentialType: string): Promise<string | null>;
 	getCredentialFields?(
 		credentialType: string,

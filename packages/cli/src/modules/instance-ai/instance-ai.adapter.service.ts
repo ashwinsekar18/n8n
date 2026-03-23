@@ -787,6 +787,36 @@ export class InstanceAiAdapterService {
 				};
 			},
 
+			async isTestable(credentialType: string) {
+				try {
+					const credClass = loadNodesAndCredentials.getCredential(credentialType);
+					if (credClass.type.test) return true;
+
+					const known = loadNodesAndCredentials.knownCredentials;
+					const supportedNodes = known[credentialType]?.supportedNodes ?? [];
+					for (const nodeName of supportedNodes) {
+						try {
+							const loaded = loadNodesAndCredentials.getNode(nodeName);
+							const nodeInstance = loaded.type;
+							const nodeDesc =
+								'nodeVersions' in nodeInstance
+									? Object.values(nodeInstance.nodeVersions).pop()?.description
+									: nodeInstance.description;
+							const hasTestedBy = nodeDesc?.credentials?.some(
+								(cred: { name: string; testedBy?: unknown }) =>
+									cred.name === credentialType && cred.testedBy,
+							);
+							if (hasTestedBy) return true;
+						} catch {
+							continue;
+						}
+					}
+					return false;
+				} catch {
+					return false;
+				}
+			},
+
 			async getDocumentationUrl(credentialType: string) {
 				try {
 					const credClass = loadNodesAndCredentials.getCredential(credentialType);

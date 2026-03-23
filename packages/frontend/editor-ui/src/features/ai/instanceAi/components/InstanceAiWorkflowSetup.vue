@@ -206,6 +206,30 @@ function initSelections() {
 }
 initSelections();
 
+/** Seed parameter values from existing node parameters for cards with param issues. */
+function initParamValues() {
+	for (const card of cards.value) {
+		if (!card.hasParamIssues) continue;
+		const req = card.nodes[0];
+		const nodeName = req.node.name;
+		if (paramValues.value[nodeName]) continue;
+
+		const editableParams = req.editableParameters ?? [];
+		const nodeParams = req.node.parameters;
+		const seeded: Record<string, unknown> = {};
+		for (const param of editableParams) {
+			const existing = nodeParams[param.name];
+			if (existing !== undefined && existing !== null && existing !== '') {
+				seeded[param.name] = existing;
+			}
+		}
+		if (Object.keys(seeded).length > 0) {
+			paramValues.value[nodeName] = seeded;
+		}
+	}
+}
+initParamValues();
+
 // ---------------------------------------------------------------------------
 // Parameter helpers
 // ---------------------------------------------------------------------------

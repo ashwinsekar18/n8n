@@ -1168,6 +1168,23 @@ export class InstanceAiAdapterService {
 		// This avoids each run retaining its own ~31 MB copy of node descriptions.
 		const getNodes = async () => await this.getNodesFromCache();
 
+		/** Find a node description matching type and optionally version. Falls back to any version. */
+		const findNodeByVersion = (
+			nodes: Awaited<ReturnType<typeof getNodes>>,
+			nodeType: string,
+			version?: number,
+		) => {
+			if (version !== undefined) {
+				const exact = nodes.find((n) => {
+					if (n.name !== nodeType) return false;
+					if (Array.isArray(n.version)) return n.version.includes(version);
+					return n.version === version;
+				});
+				if (exact) return exact;
+			}
+			return nodes.find((n) => n.name === nodeType);
+		};
+
 		return {
 			async listAvailable(options) {
 				const nodes = await getNodes();
@@ -1313,7 +1330,7 @@ export class InstanceAiAdapterService {
 
 			getParameterIssues: async (nodeType, typeVersion, parameters) => {
 				const nodes = await getNodes();
-				const desc = nodes.find((n) => n.name === nodeType);
+				const desc = findNodeByVersion(nodes, nodeType, typeVersion);
 				if (!desc) return {};
 
 				const nodeProperties = desc.properties;
@@ -1382,7 +1399,7 @@ export class InstanceAiAdapterService {
 
 			getNodeCredentialTypes: async (nodeType, typeVersion, parameters, existingCredentials) => {
 				const nodes = await getNodes();
-				const desc = nodes.find((n) => n.name === nodeType);
+				const desc = findNodeByVersion(nodes, nodeType, typeVersion);
 				if (!desc) return [];
 
 				const credentialTypes = new Set<string>();

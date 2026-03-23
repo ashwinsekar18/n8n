@@ -142,7 +142,13 @@ function initSelections() {
 		if (!req.credentialType) continue;
 		if (selections.value[req.credentialType] !== undefined) continue;
 
-		if (req.existingCredentials?.length === 1) {
+		// 1. Pre-fill from node's existing credential assignment
+		const existingOnNode = req.node.credentials?.[req.credentialType];
+		if (existingOnNode?.id) {
+			selections.value[req.credentialType] = existingOnNode.id;
+			void testCredentialInBackground(existingOnNode.id, req.credentialType);
+			// 2. Auto-select if exactly one credential available
+		} else if (req.existingCredentials?.length === 1) {
 			selections.value[req.credentialType] = req.existingCredentials[0].id;
 			void testCredentialInBackground(req.existingCredentials[0].id, req.credentialType);
 		} else {

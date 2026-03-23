@@ -2,6 +2,10 @@ import { computed, ref, watch } from 'vue';
 import { defineStore } from 'pinia';
 import { STORES } from '@n8n/stores';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
+import {
+	useWorkflowDocumentStore,
+	createWorkflowDocumentId,
+} from '@/app/stores/workflowDocument.store';
 import { usePostHog } from '@/app/stores/posthog.store';
 import { useTelemetry } from '@/app/composables/useTelemetry';
 import { useDebounceFn } from '@vueuse/core';
@@ -20,6 +24,11 @@ const MAX_UNCONFIRMED_DISPLAY = 50;
 
 export const useFocusedNodesStore = defineStore(STORES.FOCUSED_NODES, () => {
 	const workflowsStore = useWorkflowsStore();
+	const workflowDocumentStore = computed(() =>
+		workflowsStore.workflowId
+			? useWorkflowDocumentStore(createWorkflowDocumentId(workflowsStore.workflowId))
+			: undefined,
+	);
 	const posthogStore = usePostHog();
 	const telemetry = useTelemetry();
 	const chatPanelStateStore = useChatPanelStateStore();
@@ -332,8 +341,8 @@ export const useFocusedNodesStore = defineStore(STORES.FOCUSED_NODES, () => {
 		return buildFocusedNodesPayload(
 			confirmedNodes.value,
 			workflowsStore.allNodes,
-			workflowsStore.connectionsByDestinationNode,
-			workflowsStore.connectionsBySourceNode,
+			workflowDocumentStore.value?.connectionsByDestinationNode ?? {},
+			workflowDocumentStore.value?.connectionsBySourceNode ?? {},
 		);
 	}
 

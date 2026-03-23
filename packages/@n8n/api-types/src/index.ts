@@ -331,6 +331,7 @@ export type {
 	DomainAccessAction,
 	DomainAccessMeta,
 	InstanceAiCredentialFlow,
+	InstanceAiWorkflowSetupNode,
 } from './schemas/instance-ai.schema';
 
 export {

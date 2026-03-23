@@ -643,6 +643,11 @@ export const useInstanceAiStore = defineStore('instanceAi', () => {
 		autoSetup?: { credentialType: string },
 		userInput?: string,
 		domainAccessAction?: string,
+		setupWorkflowData?: {
+			action?: 'apply' | 'test-trigger';
+			nodeParameters?: Record<string, Record<string, unknown>>;
+			testTriggerNode?: string;
+		},
 	): Promise<void> {
 		try {
 			await postConfirmation(
@@ -654,6 +659,7 @@ export const useInstanceAiStore = defineStore('instanceAi', () => {
 				autoSetup,
 				userInput,
 				domainAccessAction,
+				setupWorkflowData,
 			);
 		} catch {
 			toast.showError(new Error('Failed to send confirmation. Try again.'), 'Confirmation failed');

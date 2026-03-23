@@ -167,6 +167,29 @@ export const credentialFlowSchema = z.object({
 });
 export type InstanceAiCredentialFlow = z.infer<typeof credentialFlowSchema>;
 
+export const workflowSetupNodeSchema = z.object({
+	node: z.object({
+		name: z.string(),
+		type: z.string(),
+		typeVersion: z.number(),
+		parameters: z.record(z.unknown()),
+		credentials: z.record(z.object({ id: z.string(), name: z.string() })).optional(),
+		position: z.tuple([z.number(), z.number()]),
+		id: z.string(),
+	}),
+	credentialType: z.string().optional(),
+	existingCredentials: z.array(z.object({ id: z.string(), name: z.string() })).optional(),
+	parameterIssues: z.record(z.array(z.string())).optional(),
+	isTrigger: z.boolean(),
+	triggerTestResult: z
+		.object({
+			status: z.enum(['success', 'error', 'listening']),
+			error: z.string().optional(),
+		})
+		.optional(),
+});
+export type InstanceAiWorkflowSetupNode = z.infer<typeof workflowSetupNodeSchema>;
+
 export const confirmationRequestPayloadSchema = z.object({
 	requestId: z.string(),
 	toolCallId: z.string().describe('Correlates to the tool-call that needs approval'),
@@ -193,6 +216,11 @@ export const confirmationRequestPayloadSchema = z.object({
 		.describe(
 			'Credential flow stage — finalize renders post-verification credential picker with different copy',
 		),
+	setupRequests: z
+		.array(workflowSetupNodeSchema)
+		.optional()
+		.describe('Per-node setup cards for workflow credential/parameter configuration'),
+	workflowId: z.string().optional().describe('Workflow ID for setup-workflow tool'),
 });
 
 export const statusPayloadSchema = z.object({
@@ -389,6 +417,9 @@ export interface InstanceAiConfirmResponse {
 	autoSetup?: { credentialType: string };
 	userInput?: string;
 	domainAccessAction?: DomainAccessAction;
+	action?: 'apply' | 'test-trigger';
+	nodeParameters?: Record<string, Record<string, unknown>>;
+	testTriggerNode?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +443,8 @@ export interface InstanceAiToolCallState {
 		inputType?: 'approval' | 'text';
 		domainAccess?: DomainAccessMeta;
 		credentialFlow?: InstanceAiCredentialFlow;
+		setupRequests?: InstanceAiWorkflowSetupNode[];
+		workflowId?: string;
 	};
 	confirmationStatus?: 'pending' | 'approved' | 'denied';
 	startedAt?: string;

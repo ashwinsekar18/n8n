@@ -23,6 +23,7 @@ interface SetupCard {
 	isTestable: boolean;
 	credentialTestResult?: { success: boolean; message?: string };
 	isAutoApplied: boolean;
+	hasParamIssues: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -58,7 +59,12 @@ function credGroupKey(req: InstanceAiWorkflowSetupNode): string {
 	const isHttpRequest =
 		req.node.type === HTTP_REQUEST_NODE_TYPE || req.node.type === HTTP_REQUEST_TOOL_NODE_TYPE;
 	if (isHttpRequest) {
-		return `${credType}:http:${String(req.node.parameters.url ?? '')}`;
+		const url = String(req.node.parameters.url ?? '');
+		// Expression URLs can't be grouped — each node gets its own card
+		if (url.startsWith('=')) {
+			return `${credType}:http:expr:${req.node.name}`;
+		}
+		return `${credType}:http:${url}`;
 	}
 	return credType;
 }
@@ -67,25 +73,19 @@ const cards = computed((): SetupCard[] => {
 	// Process requests in backend order. Group credential requests that share
 	// the same key; keep a stable insertion-order map so the first occurrence
 	// determines position in the final list.
+	// Nodes with parameter issues get their own card (not grouped).
 	const ordered: SetupCard[] = [];
 	const credCardByKey = new Map<string, SetupCard>();
 
 	for (const req of props.setupRequests) {
+		const hasParamIssues =
+			req.parameterIssues !== undefined && Object.keys(req.parameterIssues).length > 0;
+
 		if (req.credentialType) {
-			const key = credGroupKey(req);
-			const existing = credCardByKey.get(key);
-			if (existing) {
-				existing.nodes.push(req);
-				if (req.isTrigger) existing.isTrigger = true;
-				if (req.isFirstTrigger) existing.isFirstTrigger = true;
-				if (req.isTestable) existing.isTestable = true;
-				if (req.isAutoApplied) existing.isAutoApplied = true;
-				if (req.credentialTestResult && !existing.credentialTestResult) {
-					existing.credentialTestResult = req.credentialTestResult;
-				}
-			} else {
-				const card: SetupCard = {
-					id: `cred-${key}`,
+			// Nodes with param issues get their own card (not grouped with others)
+			if (hasParamIssues) {
+				ordered.push({
+					id: `param-${req.node.id}`,
 					credentialType: req.credentialType,
 					nodes: [req],
 					isTrigger: req.isTrigger,
@@ -93,18 +93,45 @@ const cards = computed((): SetupCard[] => {
 					isTestable: req.isTestable ?? false,
 					credentialTestResult: req.credentialTestResult,
 					isAutoApplied: req.isAutoApplied ?? false,
-				};
-				credCardByKey.set(key, card);
-				ordered.push(card);
+					hasParamIssues: true,
+				});
+			} else {
+				const key = credGroupKey(req);
+				const existing = credCardByKey.get(key);
+				if (existing) {
+					existing.nodes.push(req);
+					if (req.isTrigger) existing.isTrigger = true;
+					if (req.isFirstTrigger) existing.isFirstTrigger = true;
+					if (req.isTestable) existing.isTestable = true;
+					if (req.isAutoApplied) existing.isAutoApplied = true;
+					if (req.credentialTestResult && !existing.credentialTestResult) {
+						existing.credentialTestResult = req.credentialTestResult;
+					}
+				} else {
+					const card: SetupCard = {
+						id: `cred-${key}`,
+						credentialType: req.credentialType,
+						nodes: [req],
+						isTrigger: req.isTrigger,
+						isFirstTrigger: req.isFirstTrigger ?? false,
+						isTestable: req.isTestable ?? false,
+						credentialTestResult: req.credentialTestResult,
+						isAutoApplied: req.isAutoApplied ?? false,
+						hasParamIssues: false,
+					};
+					credCardByKey.set(key, card);
+					ordered.push(card);
+				}
 			}
-		} else if (req.isTrigger) {
+		} else if (req.isTrigger || hasParamIssues) {
 			ordered.push({
-				id: `trigger-${req.node.id}`,
+				id: hasParamIssues ? `param-${req.node.id}` : `trigger-${req.node.id}`,
 				nodes: [req],
-				isTrigger: true,
+				isTrigger: req.isTrigger,
 				isFirstTrigger: req.isFirstTrigger ?? false,
 				isTestable: req.isTestable ?? false,
 				isAutoApplied: false,
+				hasParamIssues,
 			});
 		}
 	}
@@ -130,6 +157,7 @@ const showArrows = computed(() => totalSteps.value > 1);
 const isSubmitted = ref(false);
 const isDeferred = ref(false);
 const selections = ref<Record<string, string | null>>({});
+const paramValues = ref<Record<string, Record<string, unknown>>>({});
 
 const triggerTestResults = computed(() => {
 	const results: Record<string, InstanceAiWorkflowSetupNode['triggerTestResult']> = {};
@@ -183,6 +211,39 @@ function initSelections() {
 initSelections();
 
 // ---------------------------------------------------------------------------
+// Parameter helpers
+// ---------------------------------------------------------------------------
+
+/** Get all editable parameters for a card (from the first node's editableParameters). */
+function getCardEditableParams(
+	card: SetupCard,
+): NonNullable<InstanceAiWorkflowSetupNode['editableParameters']> {
+	if (!card.hasParamIssues) return [];
+	const req = card.nodes[0];
+	return req.editableParameters ?? [];
+}
+
+/** Get parameter issues for a card (from the first node). */
+function getCardParamIssues(card: SetupCard): Record<string, string[]> {
+	if (!card.hasParamIssues) return {};
+	const req = card.nodes[0];
+	return req.parameterIssues ?? {};
+}
+
+/** Get the current value for a node parameter from paramValues. */
+function getParamValue(nodeName: string, paramName: string): unknown {
+	return paramValues.value[nodeName]?.[paramName];
+}
+
+/** Set a parameter value. */
+function setParamValue(nodeName: string, paramName: string, value: unknown): void {
+	if (!paramValues.value[nodeName]) {
+		paramValues.value[nodeName] = {};
+	}
+	paramValues.value[nodeName][paramName] = value;
+}
+
+// ---------------------------------------------------------------------------
 // Completion — first-trigger-only logic
 // ---------------------------------------------------------------------------
 
@@ -193,10 +254,21 @@ function isCardComplete(card: SetupCard): boolean {
 		if (card.credentialTestResult && !card.credentialTestResult.success) return false;
 	}
 
-	// Trigger check — only the first trigger requires execution
+	// Parameter issues check — all issue parameters must have values
+	if (card.hasParamIssues) {
+		const issues = getCardParamIssues(card);
+		const nodeName = card.nodes[0].node.name;
+		for (const paramName of Object.keys(issues)) {
+			const val = getParamValue(nodeName, paramName);
+			if (val === undefined || val === null || val === '') return false;
+		}
+	}
+
+	// Trigger check — only the first trigger requires successful execution
 	if (card.isTestable && card.isTrigger && card.isFirstTrigger) {
 		const triggerNode = card.nodes.find((n) => n.isTrigger);
-		if (triggerNode && !triggerTestResults.value[triggerNode.node.name]) return false;
+		const result = triggerNode ? triggerTestResults.value[triggerNode.node.name] : undefined;
+		if (!result || result.status !== 'success') return false;
 	}
 
 	return true;
@@ -207,7 +279,7 @@ const allCredentialsSelected = computed(() =>
 );
 
 // ---------------------------------------------------------------------------
-// Auto-advance: only when a card transitions from incomplete → complete
+// Auto-advance: only when a card transitions from incomplete -> complete
 // (not when navigating to an already-complete card)
 // ---------------------------------------------------------------------------
 
@@ -226,14 +298,14 @@ function wrappedGoToPrev() {
 watch(
 	() => currentCard.value && isCardComplete(currentCard.value),
 	(complete, prevComplete) => {
-		// Only auto-advance on a false→true transition (credential was just selected)
+		// Only auto-advance on a false->true transition (credential was just selected)
 		// Skip if user just navigated to a card that was already complete
 		if (!complete || prevComplete || userNavigated.value) {
 			userNavigated.value = false;
 			return;
 		}
 		const nextIncomplete = cards.value.findIndex(
-			(c, i) => i > currentStepIndex.value && !isCardComplete(c),
+			(c, idx) => idx > currentStepIndex.value && !isCardComplete(c),
 		);
 		if (nextIncomplete >= 0) {
 			goToStep(nextIncomplete);
@@ -278,9 +350,9 @@ function cardNodeUi(card: SetupCard): INodeUi {
 	return toNodeUi(card.nodes[0]);
 }
 
-/** True when this card only has a trigger (no credentials) */
+/** True when this card only has a trigger (no credentials and no param issues) */
 function isTriggerOnly(card: SetupCard): boolean {
-	return card.isTrigger && !card.credentialType;
+	return card.isTrigger && !card.credentialType && !card.hasParamIssues;
 }
 
 /** Use credential icon when it's a credential card */
@@ -328,6 +400,25 @@ function buildNodeCredentials(): Record<string, Record<string, string>> {
 	return result;
 }
 
+/** Build nodeParameters from paramValues (only include entries with values). */
+function buildNodeParameters(): Record<string, Record<string, unknown>> | undefined {
+	const result: Record<string, Record<string, unknown>> = {};
+	let hasValues = false;
+	for (const [nodeName, params] of Object.entries(paramValues.value)) {
+		const filtered: Record<string, unknown> = {};
+		for (const [key, val] of Object.entries(params)) {
+			if (val !== undefined && val !== null && val !== '') {
+				filtered[key] = val;
+				hasValues = true;
+			}
+		}
+		if (Object.keys(filtered).length > 0) {
+			result[nodeName] = filtered;
+		}
+	}
+	return hasValues ? result : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Event handlers
 // ---------------------------------------------------------------------------
@@ -346,6 +437,7 @@ function onCredentialSelected(card: SetupCard, updateInfo: INodeUpdateProperties
 
 function handleTestTrigger(nodeName: string) {
 	const nodeCredentials = buildNodeCredentials();
+	const nodeParameters = buildNodeParameters();
 
 	store.resolveConfirmation(props.requestId, 'approved');
 	void store.confirmAction(
@@ -360,12 +452,14 @@ function handleTestTrigger(nodeName: string) {
 			action: 'test-trigger',
 			testTriggerNode: nodeName,
 			nodeCredentials,
+			nodeParameters,
 		},
 	);
 }
 
 function handleApply() {
 	const nodeCredentials = buildNodeCredentials();
+	const nodeParameters = buildNodeParameters();
 
 	isSubmitted.value = true;
 	store.resolveConfirmation(props.requestId, 'approved');
@@ -380,6 +474,7 @@ function handleApply() {
 		{
 			action: 'apply',
 			nodeCredentials,
+			nodeParameters,
 		},
 	);
 }
@@ -472,6 +567,104 @@ function handleLater() {
 								</N8nTooltip>
 							</template>
 						</NodeCredentials>
+					</div>
+
+					<!-- Inline parameter editing -->
+					<div
+						v-if="currentCard.hasParamIssues && getCardEditableParams(currentCard).length > 0"
+						:class="$style.paramSection"
+					>
+						<N8nText size="small" color="text-light" :class="$style.paramLabel">
+							{{ i18n.baseText('instanceAi.workflowSetup.parameterIssues') }}
+						</N8nText>
+						<div
+							v-for="param in getCardEditableParams(currentCard)"
+							:key="param.name"
+							:class="$style.paramField"
+						>
+							<label :class="$style.paramFieldLabel">
+								<N8nText size="small" color="text-dark">
+									{{ param.displayName }}
+								</N8nText>
+							</label>
+
+							<!-- Options type: select -->
+							<select
+								v-if="param.options && param.options.length > 0"
+								:class="$style.paramSelect"
+								:value="getParamValue(currentCard.nodes[0].node.name, param.name) ?? ''"
+								data-test-id="instance-ai-workflow-setup-param-select"
+								@change="
+									setParamValue(
+										currentCard.nodes[0].node.name,
+										param.name,
+										($event.target as HTMLSelectElement).value,
+									)
+								"
+							>
+								<option value="" disabled>
+									{{ i18n.baseText('instanceAi.workflowSetup.selectOption') }}
+								</option>
+								<option v-for="opt in param.options" :key="String(opt.value)" :value="opt.value">
+									{{ opt.name }}
+								</option>
+							</select>
+
+							<!-- Boolean type: checkbox -->
+							<input
+								v-else-if="param.type === 'boolean'"
+								type="checkbox"
+								:class="$style.paramCheckbox"
+								:checked="Boolean(getParamValue(currentCard.nodes[0].node.name, param.name))"
+								data-test-id="instance-ai-workflow-setup-param-checkbox"
+								@change="
+									setParamValue(
+										currentCard.nodes[0].node.name,
+										param.name,
+										($event.target as HTMLInputElement).checked,
+									)
+								"
+							/>
+
+							<!-- Number type: number input -->
+							<input
+								v-else-if="param.type === 'number'"
+								type="number"
+								:class="$style.paramInput"
+								:value="getParamValue(currentCard.nodes[0].node.name, param.name) ?? ''"
+								:placeholder="param.default !== undefined ? String(param.default) : ''"
+								data-test-id="instance-ai-workflow-setup-param-number"
+								@input="
+									setParamValue(
+										currentCard.nodes[0].node.name,
+										param.name,
+										Number(($event.target as HTMLInputElement).value),
+									)
+								"
+							/>
+
+							<!-- String type: text input -->
+							<input
+								v-else-if="param.type === 'string'"
+								type="text"
+								:class="$style.paramInput"
+								:value="getParamValue(currentCard.nodes[0].node.name, param.name) ?? ''"
+								:placeholder="param.default !== undefined ? String(param.default) : ''"
+								data-test-id="instance-ai-workflow-setup-param-text"
+								@input="
+									setParamValue(
+										currentCard.nodes[0].node.name,
+										param.name,
+										($event.target as HTMLInputElement).value,
+									)
+								"
+							/>
+
+							<!-- Other types: show issue text read-only -->
+							<N8nText v-else size="small" color="text-light">
+								{{ (getCardParamIssues(currentCard)[param.name] ?? []).join(', ') }}
+							</N8nText>
+						</div>
 					</div>
 				</div>
 
@@ -607,6 +800,49 @@ function handleLater() {
 	:global(.node-credentials) {
 		margin-top: 0;
 	}
+}
+
+.paramSection {
+	display: flex;
+	flex-direction: column;
+	gap: var(--spacing--2xs);
+}
+
+.paramLabel {
+	margin-bottom: var(--spacing--4xs);
+}
+
+.paramField {
+	display: flex;
+	flex-direction: column;
+	gap: var(--spacing--4xs);
+}
+
+.paramFieldLabel {
+	display: block;
+}
+
+.paramInput,
+.paramSelect {
+	width: 100%;
+	padding: var(--spacing--4xs) var(--spacing--2xs);
+	border: var(--border);
+	border-radius: var(--radius);
+	font-family: var(--font-family);
+	font-size: var(--font-size--2xs);
+	background-color: var(--color--background);
+	color: var(--color--text);
+
+	&:focus {
+		outline: none;
+		border-color: var(--color--primary);
+	}
+}
+
+.paramCheckbox {
+	width: var(--spacing--sm);
+	height: var(--spacing--sm);
+	cursor: pointer;
 }
 
 .footer {

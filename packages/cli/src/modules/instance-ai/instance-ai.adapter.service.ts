@@ -1378,12 +1378,19 @@ export class InstanceAiAdapterService {
 
 				// 1. Displayable credentials from node type description
 				const nodeCredentials = desc.credentials ?? [];
+				// Fill defaults before evaluating display options
+				const paramsWithDefaultsForCreds: Record<string, unknown> = { ...parameters };
+				for (const prop of desc.properties) {
+					if (!(prop.name in paramsWithDefaultsForCreds) && prop.default !== undefined) {
+						paramsWithDefaultsForCreds[prop.name] = prop.default;
+					}
+				}
 				const credCheckNode: INode = {
 					id: '',
 					name: '',
 					type: nodeType,
 					typeVersion,
-					parameters: parameters as INodeParameters,
+					parameters: paramsWithDefaultsForCreds as INodeParameters,
 					position: [0, 0],
 				};
 				for (const cred of nodeCredentials) {
@@ -1391,7 +1398,7 @@ export class InstanceAiAdapterService {
 					if (cred.displayOptions) {
 						if (
 							!NodeHelpers.displayParameter(
-								parameters as INodeParameters,
+								paramsWithDefaultsForCreds as INodeParameters,
 								cred,
 								credCheckNode,
 								desc as unknown as INodeTypeDescription,

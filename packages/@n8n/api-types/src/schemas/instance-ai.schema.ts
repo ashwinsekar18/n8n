@@ -195,6 +195,26 @@ export const workflowSetupNodeSchema = z.object({
 			error: z.string().optional(),
 		})
 		.optional(),
+	parameterIssues: z.record(z.array(z.string())).optional(),
+	editableParameters: z
+		.array(
+			z.object({
+				name: z.string(),
+				displayName: z.string(),
+				type: z.string(),
+				required: z.boolean().optional(),
+				default: z.unknown().optional(),
+				options: z
+					.array(
+						z.object({
+							name: z.string(),
+							value: z.union([z.string(), z.number(), z.boolean()]),
+						}),
+					)
+					.optional(),
+			}),
+		)
+		.optional(),
 });
 export type InstanceAiWorkflowSetupNode = z.infer<typeof workflowSetupNodeSchema>;
 

@@ -255,6 +255,22 @@ function getParamValue(nodeName: string, paramName: string): unknown {
 	return paramValues.value[nodeName]?.[paramName];
 }
 
+/** Resolve a select option's string value back to its original typed value. */
+function resolveOptionValue(
+	options: Array<{ name: string; value: string | number | boolean }>,
+	stringValue: string,
+): string | number | boolean {
+	const match = options.find((o) => String(o.value) === stringValue);
+	return match ? match.value : stringValue;
+}
+
+/** Parse a number input value — empty string produces undefined, not 0. */
+function parseNumberInput(raw: string): number | undefined {
+	if (raw === '') return undefined;
+	const num = Number(raw);
+	return Number.isNaN(num) ? undefined : num;
+}
+
 /** Set a parameter value. */
 function setParamValue(nodeName: string, paramName: string, value: unknown): void {
 	if (!paramValues.value[nodeName]) {
@@ -676,17 +692,17 @@ function handleLater() {
 								</N8nText>
 							</label>
 
-							<!-- Options type: select -->
+							<!-- Options type: select (preserves original value type) -->
 							<select
 								v-if="param.options && param.options.length > 0"
 								:class="$style.paramSelect"
-								:value="getParamValue(currentCard.nodes[0].node.name, param.name) ?? ''"
+								:value="String(getParamValue(currentCard.nodes[0].node.name, param.name) ?? '')"
 								data-test-id="instance-ai-workflow-setup-param-select"
 								@change="
 									setParamValue(
 										currentCard.nodes[0].node.name,
 										param.name,
-										($event.target as HTMLSelectElement).value,
+										resolveOptionValue(param.options!, ($event.target as HTMLSelectElement).value),
 									)
 								"
 							>
@@ -726,7 +742,7 @@ function handleLater() {
 									setParamValue(
 										currentCard.nodes[0].node.name,
 										param.name,
-										Number(($event.target as HTMLInputElement).value),
+										parseNumberInput(($event.target as HTMLInputElement).value),
 									)
 								"
 							/>

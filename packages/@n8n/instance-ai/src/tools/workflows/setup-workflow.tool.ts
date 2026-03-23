@@ -114,8 +114,12 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 					[resumeData.testTriggerNode]: triggerTestResult,
 				});
 
+				// Generate a new requestId so the frontend doesn't filter it
+				// as already-resolved from the previous suspend cycle
+				currentRequestId = nanoid();
+
 				await suspend?.({
-					requestId: currentRequestId ?? nanoid(),
+					requestId: currentRequestId,
 					message: 'Configure credentials for your workflow',
 					severity: 'info' as const,
 					setupRequests: refreshedRequests,

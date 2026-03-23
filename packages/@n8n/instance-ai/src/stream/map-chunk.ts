@@ -199,11 +199,14 @@ export function mapMastraChunkToEvent(
 		const rawCredentialFlow = isRecord(suspendPayload.credentialFlow)
 			? suspendPayload.credentialFlow
 			: undefined;
+		const validStages = new Set<'generic' | 'finalize'>(['generic', 'finalize']);
+		const rawStage =
+			rawCredentialFlow && typeof rawCredentialFlow.stage === 'string'
+				? rawCredentialFlow.stage
+				: undefined;
 		const credentialFlow =
-			rawCredentialFlow &&
-			typeof rawCredentialFlow.stage === 'string' &&
-			(rawCredentialFlow.stage === 'generic' || rawCredentialFlow.stage === 'finalize')
-				? { stage: rawCredentialFlow.stage }
+			rawStage !== undefined && validStages.has(rawStage as 'generic' | 'finalize')
+				? { stage: rawStage as 'generic' | 'finalize' }
 				: undefined;
 
 		// Extract and validate optional setupRequests for workflow setup HITL

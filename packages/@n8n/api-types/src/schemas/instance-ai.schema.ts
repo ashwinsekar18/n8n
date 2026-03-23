@@ -181,6 +181,14 @@ export const workflowSetupNodeSchema = z.object({
 	existingCredentials: z.array(z.object({ id: z.string(), name: z.string() })).optional(),
 	parameterIssues: z.record(z.array(z.string())).optional(),
 	isTrigger: z.boolean(),
+	isTestable: z.boolean().optional(),
+	isAutoApplied: z.boolean().optional(),
+	credentialTestResult: z
+		.object({
+			success: z.boolean(),
+			message: z.string().optional(),
+		})
+		.optional(),
 	triggerTestResult: z
 		.object({
 			status: z.enum(['success', 'error', 'listening']),

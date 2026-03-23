@@ -20,6 +20,14 @@ const setupNodeSchema = z.object({
 	existingCredentials: z.array(z.object({ id: z.string(), name: z.string() })).optional(),
 	parameterIssues: z.record(z.array(z.string())).optional(),
 	isTrigger: z.boolean(),
+	isTestable: z.boolean().optional(),
+	isAutoApplied: z.boolean().optional(),
+	credentialTestResult: z
+		.object({
+			success: z.boolean(),
+			message: z.string().optional(),
+		})
+		.optional(),
 	triggerTestResult: z
 		.object({
 			status: z.enum(['success', 'error', 'listening']),
@@ -31,61 +39,166 @@ const setupNodeSchema = z.object({
 type SetupRequest = z.infer<typeof setupNodeSchema>;
 
 /**
- * Build a setup request from a WorkflowJSON node.
- * Uses the node's own credential types (from its credentials field) rather than
- * fetching the node type description, which avoids typeVersion mismatch issues.
+ * Build setup request(s) from a WorkflowJSON node.
+ * Uses full credential type detection, parameter issue computation,
+ * auto-selection of most recent credential, and trigger eligibility.
  */
-async function buildSetupRequest(
+async function buildSetupRequests(
 	context: InstanceAiContext,
 	node: NodeJSON,
 	triggerTestResult?: { status: 'success' | 'error'; error?: string },
-): Promise<SetupRequest | null> {
-	if (!node.name) return null;
+): Promise<SetupRequest[]> {
+	if (!node.name) return [];
 
-	// Use credentials already on the node (from WorkflowJSON) to determine type.
-	// This is more reliable than getDescription() which may return the wrong version.
-	const nodeCredTypes = node.credentials ? Object.keys(node.credentials) : [];
+	const typeVersion = node.typeVersion ?? 1;
+	const parameters = (node.parameters as Record<string, unknown>) ?? {};
 
-	// Fall back to node description if the node has no credentials assigned yet
-	let credentialType: string | undefined;
-	if (nodeCredTypes.length > 0) {
-		credentialType = nodeCredTypes[0];
+	// Get node description for trigger metadata
+	const nodeDesc = await context.nodeService.getDescription(node.type).catch(() => undefined);
+
+	// Determine trigger status from node type description (not string matching)
+	const isTrigger = nodeDesc?.group?.includes('trigger') ?? false;
+	const isTestable =
+		isTrigger &&
+		((nodeDesc?.webhooks !== undefined && nodeDesc.webhooks.length > 0) ||
+			nodeDesc?.polling === true ||
+			nodeDesc?.triggerPanel !== undefined);
+
+	// Get full credential types using the new service method or fall back
+	let credentialTypes: string[] = [];
+	if (context.nodeService.getNodeCredentialTypes) {
+		credentialTypes = await context.nodeService
+			.getNodeCredentialTypes(
+				node.type,
+				typeVersion,
+				parameters,
+				node.credentials as Record<string, unknown> | undefined,
+			)
+			.catch(() => []);
 	} else {
-		const nodeDesc = await context.nodeService.getDescription(node.type).catch(() => undefined);
-		credentialType = nodeDesc?.credentials?.[0]?.name;
+		// Fallback: use node's existing credentials or first from description
+		const nodeCredTypes = node.credentials ? Object.keys(node.credentials) : [];
+		if (nodeCredTypes.length > 0) {
+			credentialTypes = nodeCredTypes;
+		} else if (nodeDesc?.credentials?.[0]?.name) {
+			credentialTypes = [nodeDesc.credentials[0].name];
+		}
 	}
 
-	const isTrigger = node.type.toLowerCase().includes('trigger');
-
-	let existingCredentials: Array<{ id: string; name: string }> = [];
-	if (credentialType) {
-		const creds = await context.credentialService.list({ type: credentialType });
-		existingCredentials = creds.map((c) => ({ id: c.id, name: c.name }));
+	// Compute parameter issues using backend service
+	let parameterIssues: Record<string, string[]> = {};
+	if (context.nodeService.getParameterIssues) {
+		parameterIssues = await context.nodeService
+			.getParameterIssues(node.type, typeVersion, parameters)
+			.catch(() => ({}));
 	}
 
-	return {
-		node: {
-			name: node.name,
-			type: node.type,
-			typeVersion: node.typeVersion ?? 1,
-			parameters: (node.parameters as Record<string, unknown>) ?? {},
-			position: node.position ?? [0, 0],
-			id: node.id ?? nanoid(),
-			...(node.credentials
-				? {
-						credentials: Object.fromEntries(
-							Object.entries(node.credentials)
-								.filter(([, v]) => v.id !== undefined)
-								.map(([k, v]) => [k, { id: v.id!, name: v.name }]),
-						),
-					}
-				: {}),
-		},
-		...(credentialType ? { credentialType } : {}),
-		...(existingCredentials.length > 0 ? { existingCredentials } : {}),
-		isTrigger,
-		...(triggerTestResult ? { triggerTestResult } : {}),
-	};
+	const nodeId = node.id ?? nanoid();
+	const nodePosition: [number, number] = node.position ?? [0, 0];
+
+	// Build one setup request per credential type
+	const requests: SetupRequest[] = [];
+	const processedCredTypes = credentialTypes.length > 0 ? credentialTypes : [undefined];
+
+	for (const credentialType of processedCredTypes) {
+		let existingCredentials: Array<{ id: string; name: string }> = [];
+		let isAutoApplied = false;
+		let credentialTestResult: { success: boolean; message?: string } | undefined;
+		const nodeCredentials = node.credentials
+			? Object.fromEntries(
+					Object.entries(node.credentials)
+						.filter(([, v]) => v.id !== undefined)
+						.map(([k, v]) => [k, { id: v.id!, name: v.name }]),
+				)
+			: undefined;
+
+		if (credentialType) {
+			const creds = await context.credentialService.list({ type: credentialType });
+			existingCredentials = creds
+				.map((c) => ({ id: c.id, name: c.name, updatedAt: c.updatedAt }))
+				// Sort by most recently updated first
+				.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+				.map((c) => ({ id: c.id, name: c.name }));
+
+			// Auto-select: if node doesn't have a credential assigned and there are existing ones,
+			// pre-assign the most recently updated one
+			const existingOnNode = node.credentials?.[credentialType];
+			if (!existingOnNode?.id && existingCredentials.length > 0) {
+				const autoSelected = existingCredentials[0];
+				// Apply to node credentials in the setup request
+				if (!nodeCredentials) {
+					// Will be set below
+				}
+				isAutoApplied = true;
+
+				// Assign to the node's credentials for the setup request
+				if (nodeCredentials) {
+					nodeCredentials[credentialType] = { id: autoSelected.id, name: autoSelected.name };
+				}
+			}
+
+			// Test the assigned credential (either existing on node or auto-selected)
+			const credToTest =
+				existingOnNode?.id ?? (isAutoApplied ? existingCredentials[0]?.id : undefined);
+			if (credToTest) {
+				credentialTestResult = await context.credentialService
+					.test(credToTest)
+					.catch((testError) => ({
+						success: false,
+						message: testError instanceof Error ? testError.message : 'Test failed',
+					}));
+			}
+		}
+
+		// Only include if there's something to set up
+		if (!credentialType && !isTrigger && Object.keys(parameterIssues).length === 0) continue;
+
+		const request: SetupRequest = {
+			node: {
+				name: node.name,
+				type: node.type,
+				typeVersion,
+				parameters,
+				position: nodePosition,
+				id: nodeId,
+				...(nodeCredentials && Object.keys(nodeCredentials).length > 0
+					? {
+							credentials:
+								isAutoApplied && credentialType && existingCredentials.length > 0
+									? {
+											...nodeCredentials,
+											[credentialType]: {
+												id: existingCredentials[0].id,
+												name: existingCredentials[0].name,
+											},
+										}
+									: nodeCredentials,
+						}
+					: isAutoApplied && credentialType && existingCredentials.length > 0
+						? {
+								credentials: {
+									[credentialType]: {
+										id: existingCredentials[0].id,
+										name: existingCredentials[0].name,
+									},
+								},
+							}
+						: {}),
+			},
+			...(credentialType ? { credentialType } : {}),
+			...(existingCredentials.length > 0 ? { existingCredentials } : {}),
+			...(Object.keys(parameterIssues).length > 0 ? { parameterIssues } : {}),
+			isTrigger,
+			...(isTestable ? { isTestable } : {}),
+			...(isAutoApplied ? { isAutoApplied } : {}),
+			...(credentialTestResult ? { credentialTestResult } : {}),
+			...(triggerTestResult ? { triggerTestResult } : {}),
+		};
+
+		requests.push(request);
+	}
+
+	return requests;
 }
 
 /**
@@ -154,14 +267,18 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 				// Use getAsWorkflowJSON for full node data (typeVersion, credentials, id)
 				const workflowJson = await context.workflowService.getAsWorkflowJSON(input.workflowId);
 
-				const allRequests = await Promise.all(
-					workflowJson.nodes.map(async (node) => await buildSetupRequest(context, node)),
+				const allRequestArrays = await Promise.all(
+					workflowJson.nodes.map(async (node) => await buildSetupRequests(context, node)),
 				);
 
-				const setupRequests = allRequests.filter(
-					(req): req is SetupRequest =>
-						req !== null && (req.credentialType !== undefined || req.isTrigger),
-				);
+				const setupRequests = allRequestArrays
+					.flat()
+					.filter(
+						(req) =>
+							req.credentialType !== undefined ||
+							req.isTrigger ||
+							(req.parameterIssues && Object.keys(req.parameterIssues).length > 0),
+					);
 
 				if (setupRequests.length === 0) {
 					return { success: true, reason: 'No nodes require setup.' };
@@ -239,7 +356,7 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 				const allRefreshed = await Promise.all(
 					updatedJson.nodes.map(
 						async (node) =>
-							await buildSetupRequest(
+							await buildSetupRequests(
 								context,
 								node,
 								node.name === resumeData.testTriggerNode ? triggerTestResult : undefined,
@@ -247,10 +364,14 @@ export function createSetupWorkflowTool(context: InstanceAiContext) {
 					),
 				);
 
-				const refreshedRequests = allRefreshed.filter(
-					(req): req is SetupRequest =>
-						req !== null && (req.credentialType !== undefined || req.isTrigger),
-				);
+				const refreshedRequests = allRefreshed
+					.flat()
+					.filter(
+						(req) =>
+							req.credentialType !== undefined ||
+							req.isTrigger ||
+							(req.parameterIssues && Object.keys(req.parameterIssues).length > 0),
+					);
 
 				lastSetupRequests = refreshedRequests;
 

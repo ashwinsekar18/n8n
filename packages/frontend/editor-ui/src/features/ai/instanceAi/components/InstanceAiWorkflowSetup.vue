@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import { N8nButton, N8nIcon, N8nText, N8nTooltip } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
 import type { InstanceAiWorkflowSetupNode, InstanceAiCredentialFlow } from '@n8n/api-types';
@@ -19,7 +19,10 @@ interface SetupCard {
 	credentialType?: string;
 	nodes: InstanceAiWorkflowSetupNode[];
 	isTrigger: boolean;
+	isTestable: boolean;
 	hasParamIssues: boolean;
+	credentialTestResult?: { success: boolean; message?: string };
+	isAutoApplied: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -40,7 +43,14 @@ const store = useInstanceAiStore();
 const credentialsStore = useCredentialsStore();
 
 // ---------------------------------------------------------------------------
-// Card grouping
+// Constants
+// ---------------------------------------------------------------------------
+
+const HTTP_REQUEST_NODE_TYPE = 'n8n-nodes-base.httpRequest';
+const HTTP_REQUEST_TOOL_NODE_TYPE = '@n8n/n8n-nodes-langchain.toolHttpRequest';
+
+// ---------------------------------------------------------------------------
+// Card grouping (with HTTP Request URL grouping)
 // ---------------------------------------------------------------------------
 
 const cards = computed((): SetupCard[] => {
@@ -57,32 +67,58 @@ const cards = computed((): SetupCard[] => {
 				credentialType: req.credentialType,
 				nodes: [req],
 				isTrigger: req.isTrigger,
+				isTestable: req.isTestable ?? false,
 				hasParamIssues: true,
+				credentialTestResult: req.credentialTestResult,
+				isAutoApplied: req.isAutoApplied ?? false,
 			});
 		} else if (req.credentialType) {
-			const existing = credGroups.get(req.credentialType);
+			// Group HTTP Request nodes by credentialType + URL
+			const isHttpRequest =
+				req.node.type === HTTP_REQUEST_NODE_TYPE || req.node.type === HTTP_REQUEST_TOOL_NODE_TYPE;
+
+			let mapKey: string;
+			if (isHttpRequest) {
+				const url = String(req.node.parameters.url ?? '');
+				mapKey = `${req.credentialType}:http:${url}`;
+			} else {
+				mapKey = req.credentialType;
+			}
+
+			const existing = credGroups.get(mapKey);
 			if (existing) {
 				existing.push(req);
 			} else {
-				credGroups.set(req.credentialType, [req]);
+				credGroups.set(mapKey, [req]);
 			}
 		} else if (req.isTrigger) {
 			result.push({
 				id: `trigger-${req.node.id}`,
 				nodes: [req],
 				isTrigger: true,
+				isTestable: req.isTestable ?? false,
 				hasParamIssues: false,
+				isAutoApplied: false,
 			});
 		}
 	}
 
-	for (const [credType, nodes] of credGroups) {
+	for (const [, nodes] of credGroups) {
+		const firstNode = nodes[0];
+		const credType = firstNode.credentialType!;
+		// Merge credential test results — use the first available
+		const testResult = nodes.find((n) => n.credentialTestResult)?.credentialTestResult;
+		const autoApplied = nodes.some((n) => n.isAutoApplied);
+
 		result.push({
-			id: `cred-${credType}`,
+			id: `cred-${credType}-${nodes.map((n) => n.node.id).join('-')}`,
 			credentialType: credType,
 			nodes,
 			isTrigger: nodes.some((n) => n.isTrigger),
+			isTestable: nodes.some((n) => n.isTestable),
 			hasParamIssues: false,
+			credentialTestResult: testResult,
+			isAutoApplied: autoApplied,
 		});
 	}
 
@@ -99,6 +135,12 @@ const { currentStepIndex, isPrevDisabled, isNextDisabled, goToNext, goToPrev } =
 
 const currentCard = computed(() => cards.value[currentStepIndex.value]);
 const showArrows = computed(() => totalSteps.value > 1);
+
+function goToStep(index: number) {
+	// Navigate by calling goToNext/goToPrev until we reach the target
+	while (currentStepIndex.value < index && !isNextDisabled.value) goToNext();
+	while (currentStepIndex.value > index && !isPrevDisabled.value) goToPrev();
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -147,6 +189,9 @@ function initSelections() {
 			// 2. Auto-select if exactly one credential available
 		} else if (req.existingCredentials?.length === 1) {
 			selections.value[req.credentialType] = req.existingCredentials[0].id;
+			// 3. Auto-selected by backend (most recent)
+		} else if (req.isAutoApplied && req.existingCredentials?.length) {
+			selections.value[req.credentialType] = req.existingCredentials[0].id;
 		} else {
 			selections.value[req.credentialType] = null;
 		}
@@ -159,15 +204,24 @@ initSelections();
 // ---------------------------------------------------------------------------
 
 function isCardComplete(card: SetupCard): boolean {
+	// Credential check
 	if (card.credentialType) {
 		const selectedId = selections.value[card.credentialType];
 		if (!selectedId) return false;
+
+		// Credential test must pass (if result available)
+		if (card.credentialTestResult && !card.credentialTestResult.success) return false;
 	}
+
+	// Parameter issues check
 	if (card.hasParamIssues) return false;
-	if (card.isTrigger) {
+
+	// Trigger check — only if testable
+	if (card.isTestable && card.isTrigger) {
 		const triggerNode = card.nodes.find((n) => n.isTrigger);
 		if (triggerNode && !triggerTestResults.value[triggerNode.node.name]) return false;
 	}
+
 	return true;
 }
 
@@ -176,6 +230,31 @@ const allCredentialsSelected = computed(() =>
 		.filter((c) => c.credentialType)
 		.every((c) => selections.value[c.credentialType!] !== null),
 );
+
+// ---------------------------------------------------------------------------
+// Auto-advance: when current card becomes complete, go to next incomplete
+// ---------------------------------------------------------------------------
+
+watch(
+	() => currentCard.value && isCardComplete(currentCard.value),
+	(complete) => {
+		if (!complete) return;
+		const nextIncomplete = cards.value.findIndex(
+			(c, i) => i > currentStepIndex.value && !isCardComplete(c),
+		);
+		if (nextIncomplete >= 0) {
+			goToStep(nextIncomplete);
+		}
+	},
+);
+
+// On mount, skip to first incomplete card
+onMounted(() => {
+	const firstIncomplete = cards.value.findIndex((c) => !isCardComplete(c));
+	if (firstIncomplete > 0) {
+		goToStep(firstIncomplete);
+	}
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -224,6 +303,18 @@ const nodeNames = computed(() => {
 });
 
 const nodeNamesTooltip = computed(() => nodeNames.value.join(', '));
+
+/** Credential test status icon for the card header */
+function getCredTestIcon(card: SetupCard): 'spinner' | 'check' | 'triangle-alert' | null {
+	if (!card.credentialType) return null;
+	const selectedId = selections.value[card.credentialType];
+	if (!selectedId) return null;
+
+	if (card.isAutoApplied && !card.credentialTestResult) return 'spinner';
+	if (card.credentialTestResult?.success) return 'check';
+	if (card.credentialTestResult && !card.credentialTestResult.success) return 'triangle-alert';
+	return null;
+}
 
 // ---------------------------------------------------------------------------
 // Event handlers
@@ -314,6 +405,27 @@ function handleLater() {
 					<N8nText :class="$style.title" size="medium" color="text-dark" bold>
 						{{ getCardTitle(currentCard) }}
 					</N8nText>
+
+					<!-- Credential test status icon -->
+					<N8nIcon
+						v-if="getCredTestIcon(currentCard) === 'spinner'"
+						icon="spinner"
+						size="small"
+						:class="$style.loading"
+					/>
+					<N8nIcon
+						v-else-if="getCredTestIcon(currentCard) === 'check'"
+						icon="check"
+						size="small"
+						:class="$style.success"
+					/>
+					<N8nIcon
+						v-else-if="getCredTestIcon(currentCard) === 'triangle-alert'"
+						icon="triangle-alert"
+						size="small"
+						:class="$style.error"
+					/>
+
 					<N8nText
 						v-if="isCardComplete(currentCard)"
 						data-test-id="instance-ai-workflow-setup-step-check"
@@ -420,7 +532,7 @@ function handleLater() {
 						/>
 
 						<N8nButton
-							v-if="currentCard.isTrigger"
+							v-if="currentCard.isTestable && currentCard.isTrigger"
 							size="small"
 							:class="$style.actionButton"
 							:label="i18n.baseText('instanceAi.workflowSetup.testTrigger')"

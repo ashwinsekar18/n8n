@@ -65,6 +65,7 @@ import {
 	type IDataObject,
 	type INode,
 	type INodeParameters,
+	type INodeTypeDescription,
 	type IConnections,
 	type IWorkflowSettings,
 	type IPinData,
@@ -73,6 +74,7 @@ import {
 	type DataTableRow,
 	type DataTableRows,
 	type WorkflowExecuteMode,
+	NodeHelpers,
 	createRunExecutionData,
 	CHAT_TRIGGER_NODE_TYPE,
 	FORM_TRIGGER_NODE_TYPE,
@@ -1248,6 +1250,9 @@ export class InstanceAiAdapterService {
 					})),
 					inputs: Array.isArray(desc.inputs) ? desc.inputs.map(String) : [],
 					outputs: Array.isArray(desc.outputs) ? desc.outputs.map(String) : [],
+					...(desc.webhooks ? { webhooks: desc.webhooks as unknown[] } : {}),
+					...(desc.polling ? { polling: desc.polling } : {}),
+					...(desc.triggerPanel !== undefined ? { triggerPanel: desc.triggerPanel } : {}),
 				} satisfies NodeDescription;
 			},
 
@@ -1263,6 +1268,144 @@ export class InstanceAiAdapterService {
 
 			listDiscriminators: async (nodeType) => {
 				return listNodeDiscriminators(nodeType, this.getNodeDefinitionDirs());
+			},
+
+			getParameterIssues: async (nodeType, typeVersion, parameters) => {
+				const nodes = await getNodes();
+				const desc = nodes.find((n) => n.name === nodeType);
+				if (!desc) return {};
+
+				const nodeProperties = desc.properties;
+
+				// Fill in default values for parameters not explicitly set
+				const paramsWithDefaults: Record<string, unknown> = { ...parameters };
+				for (const prop of nodeProperties) {
+					if (!(prop.name in paramsWithDefaults) && prop.default !== undefined) {
+						paramsWithDefaults[prop.name] = prop.default;
+					}
+				}
+
+				const minimalNode: INode = {
+					id: '',
+					name: '',
+					type: nodeType,
+					typeVersion,
+					parameters: paramsWithDefaults as INodeParameters,
+					position: [0, 0],
+				};
+
+				const issues = NodeHelpers.getNodeParametersIssues(
+					nodeProperties,
+					minimalNode,
+					desc as unknown as INodeTypeDescription,
+				);
+				const allIssues = issues?.parameters ?? {};
+
+				// Filter to top-level visible parameters only (mirrors setupPanel.utils.ts logic)
+				const topLevelPropsByName = new Map<string, typeof nodeProperties>();
+				for (const prop of nodeProperties) {
+					const existing = topLevelPropsByName.get(prop.name);
+					if (existing) {
+						existing.push(prop);
+					} else {
+						topLevelPropsByName.set(prop.name, [prop]);
+					}
+				}
+
+				const filteredIssues: Record<string, string[]> = {};
+				for (const [key, value] of Object.entries(allIssues)) {
+					const props = topLevelPropsByName.get(key);
+					if (!props) continue;
+
+					const isDisplayed = props.some((prop) => {
+						if (prop.type === 'hidden') return false;
+						if (
+							prop.displayOptions &&
+							!NodeHelpers.displayParameter(
+								paramsWithDefaults as INodeParameters,
+								prop,
+								minimalNode,
+								desc as unknown as INodeTypeDescription,
+							)
+						) {
+							return false;
+						}
+						return true;
+					});
+					if (!isDisplayed) continue;
+
+					filteredIssues[key] = value;
+				}
+				return filteredIssues;
+			},
+
+			getNodeCredentialTypes: async (nodeType, typeVersion, parameters, existingCredentials) => {
+				const nodes = await getNodes();
+				const desc = nodes.find((n) => n.name === nodeType);
+				if (!desc) return [];
+
+				const credentialTypes = new Set<string>();
+
+				// 1. Displayable credentials from node type description
+				const nodeCredentials = desc.credentials ?? [];
+				const credCheckNode: INode = {
+					id: '',
+					name: '',
+					type: nodeType,
+					typeVersion,
+					parameters: parameters as INodeParameters,
+					position: [0, 0],
+				};
+				for (const cred of nodeCredentials) {
+					// Check if credential is displayable given current parameters
+					if (cred.displayOptions) {
+						if (
+							!NodeHelpers.displayParameter(
+								parameters as INodeParameters,
+								cred,
+								credCheckNode,
+								desc as unknown as INodeTypeDescription,
+							)
+						) {
+							continue;
+						}
+					}
+					credentialTypes.add(cred.name);
+				}
+
+				// 2. Node issues for dynamic credentials (e.g. HTTP Request missing auth)
+				const paramsWithDefaults: Record<string, unknown> = { ...parameters };
+				for (const prop of desc.properties) {
+					if (!(prop.name in paramsWithDefaults) && prop.default !== undefined) {
+						paramsWithDefaults[prop.name] = prop.default;
+					}
+				}
+				const minimalNode: INode = {
+					id: '',
+					name: '',
+					type: nodeType,
+					typeVersion,
+					parameters: paramsWithDefaults as INodeParameters,
+					position: [0, 0],
+				};
+				const issues = NodeHelpers.getNodeParametersIssues(
+					desc.properties,
+					minimalNode,
+					desc as unknown as INodeTypeDescription,
+				);
+				const credentialIssues = issues?.credentials ?? {};
+				for (const credType of Object.keys(credentialIssues)) {
+					credentialTypes.add(credType);
+				}
+
+				// 3. Already-assigned credentials
+				if (existingCredentials) {
+					for (const credType of Object.keys(existingCredentials)) {
+						credentialTypes.add(credType);
+					}
+				}
+
+				return Array.from(credentialTypes);
 			},
 
 			exploreResources: async (params: ExploreResourcesParams): Promise<ExploreResourcesResult> => {

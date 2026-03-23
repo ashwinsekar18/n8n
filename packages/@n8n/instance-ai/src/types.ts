@@ -115,6 +115,9 @@ export interface NodeDescription extends NodeSummary {
 	credentials?: Array<{ name: string; required?: boolean }>;
 	inputs: string[];
 	outputs: string[];
+	webhooks?: unknown[];
+	polling?: boolean;
+	triggerPanel?: unknown;
 }
 
 // ── Service interfaces ───────────────────────────────────────────────────────
@@ -269,6 +272,19 @@ export interface InstanceAiNodeService {
 	): Promise<{ resources: Array<{ name: string; operations: string[] }> } | null>;
 	/** Query real resources via a node's listSearch or loadOptions methods (e.g. list spreadsheets, models). */
 	exploreResources?(params: ExploreResourcesParams): Promise<ExploreResourcesResult>;
+	/** Compute parameter issues for a node (mirrors builder's NodeHelpers.getNodeParametersIssues). */
+	getParameterIssues?(
+		nodeType: string,
+		typeVersion: number,
+		parameters: Record<string, unknown>,
+	): Promise<Record<string, string[]>>;
+	/** Return all credential types a node requires (displayable + dynamic + assigned). */
+	getNodeCredentialTypes?(
+		nodeType: string,
+		typeVersion: number,
+		parameters: Record<string, unknown>,
+		existingCredentials?: Record<string, unknown>,
+	): Promise<string[]>;
 }
 
 /** Richer node type shape that includes inputs, outputs, codex, and builderHint.

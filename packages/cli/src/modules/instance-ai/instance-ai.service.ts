@@ -164,6 +164,9 @@ export class InstanceAiService {
 	/** Tracks the last researchMode setting per thread for follow-up runs. */
 	private readonly threadResearchMode = new Map<string, boolean>();
 
+	/** Tracks the last client timezone per thread for follow-up runs. */
+	private readonly threadTimeZone = new Map<string, string>();
+
 	/** Tracks the current messageGroupId per thread for auto-follow-up run merging. */
 	private readonly threadMessageGroupId = new Map<string, string>();
 
@@ -176,6 +179,9 @@ export class InstanceAiService {
 	/** Factory for creating per-builder ephemeral sandboxes. */
 	private builderSandboxFactory?: BuilderSandboxFactory;
 
+	/** Default IANA timezone for the instance (from GENERIC_TIMEZONE env var). */
+	private readonly defaultTimeZone: string;
+
 	constructor(
 		private readonly logger: Logger,
 		globalConfig: GlobalConfig,
@@ -186,6 +192,7 @@ export class InstanceAiService {
 		private readonly compactionService: InstanceAiCompactionService,
 	) {
 		this.instanceAiConfig = globalConfig.instanceAi;
+		this.defaultTimeZone = globalConfig.generic.timezone;
 		const editorBaseUrl = globalConfig.editorBaseUrl || `http://localhost:${globalConfig.port}`;
 		const restEndpoint = globalConfig.endpoints.rest;
 		this.oauth2CallbackUrl = `${editorBaseUrl.replace(/\/$/, '')}/${restEndpoint}/oauth2-credential/callback`;
@@ -322,6 +329,7 @@ export class InstanceAiService {
 		message: string,
 		researchMode?: boolean,
 		attachments?: InstanceAiAttachment[],
+		timeZone?: string,
 	): string {
 		const runId = `run_${nanoid()}`;
 		const abortController = new AbortController();
@@ -330,6 +338,9 @@ export class InstanceAiService {
 		this.threadUsers.set(threadId, user);
 		if (researchMode !== undefined) {
 			this.threadResearchMode.set(threadId, researchMode);
+		}
+		if (timeZone !== undefined) {
+			this.threadTimeZone.set(threadId, timeZone);
 		}
 
 		// User-initiated runs get a fresh messageGroupId.
@@ -359,6 +370,7 @@ export class InstanceAiService {
 			researchMode,
 			attachments,
 			messageGroupId,
+			timeZone,
 		);
 
 		return runId;
@@ -570,6 +582,7 @@ export class InstanceAiService {
 		researchMode?: boolean,
 		attachments?: InstanceAiAttachment[],
 		messageGroupId?: string,
+		timeZone?: string,
 	): Promise<void> {
 		const signal = abortController.signal;
 
@@ -735,6 +748,7 @@ export class InstanceAiService {
 				memory,
 				workspace: sandboxEntry?.workspace,
 				disableDeferredTools: true,
+				timeZone: timeZone ?? this.threadTimeZone.get(threadId) ?? this.defaultTimeZone,
 			});
 
 			// Compact older conversation history into a summary (best-effort, non-blocking on failure)

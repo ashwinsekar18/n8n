@@ -117,8 +117,8 @@ if zip_code and len(zip_code) == 5 and zip_code.isdigit():
             })
             
             # Slice the next 24 hours starting from the current hour
-            current_time_str = current["time"]
-            current_idx_list = df_hourly.index[df_hourly["Time"] == current_time_str].tolist()
+            current_time_dt = pd.to_datetime(current["time"])
+            current_idx_list = df_hourly.index[df_hourly["Time"] == current_time_dt].tolist()
             
             if current_idx_list:
                 start_idx = current_idx_list[0]
